@@ -16,7 +16,7 @@ class DownloadError(Exception):
 def _explain(text):
     s = text.lower()
     if "sign in to confirm" in s or "not a bot" in s:
-        return ("YouTube yêu cầu đăng nhập để tải video này. Vào Cài đặt → 'Khi YouTube chặn' và chọn trình duyệt "
+        return ("YouTube yêu cầu đăng nhập để tải video này. Vào Cài đặt → Tải video, chọn trình duyệt "
                 "bạn đang đăng nhập YouTube (Firefox ổn định nhất; với Chrome/Edge hãy đóng trình duyệt trước), rồi thử lại.")
     if "age" in s and ("restrict" in s or "confirm your age" in s):
         return "Video giới hạn độ tuổi: chọn trình duyệt đã đăng nhập YouTube trong Cài đặt rồi thử lại."
