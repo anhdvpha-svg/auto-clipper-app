@@ -1,0 +1,60 @@
+name: Build Windows installer
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Freeze app (PyInstaller)
+        run: python build.py
+
+      - name: Self-test the frozen app (download tools, render 2 clips, open window)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\AutoClipper\AutoClipper.exe" -ArgumentList "--selftest", "$env:RUNNER_TEMP\selftest" -Wait -PassThru
+          Get-Content "$env:RUNNER_TEMP\selftest\selftest.log" -Tail 60
+          if ($p.ExitCode -ne 0) { throw "Self-test failed (exit $($p.ExitCode))" }
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) { choco install innosetup -y --no-progress }
+          $ver = if ($env:GITHUB_REF -like "refs/tags/v*") { $env:GITHUB_REF_NAME.TrimStart("v") } else { "1.0.$env:GITHUB_RUN_NUMBER" }
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          & $iscc "/DAppVersion=$ver" installer\autoclipper.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+          Get-ChildItem dist\*.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutoClipper-Setup
+          path: dist/AutoClipper-Setup-*.exe
+          retention-days: 30
+
+      - name: Publish release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/AutoClipper-Setup-*.exe
