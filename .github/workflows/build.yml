@@ -53,8 +53,16 @@ jobs:
           path: dist/AutoClipper-Setup-*.exe
           retention-days: 30
 
-      - name: Publish release (tags only)
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Publish release (tag pushes, or every successful build on main)
+        if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v1.0.{0}', github.run_number) }}
+          name: Auto Clipper ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v1.0.{0}', github.run_number) }}
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          body: |
+            Tải **AutoClipper-Setup-*.exe** ở mục Assets bên dưới, chạy để cài đặt.
+            Nếu Windows SmartScreen cảnh báo: bấm **More info → Run anyway** (app chưa có chữ ký số).
+            Bản này đã qua bước tự kiểm tra trên Windows (dựng 2 clip mẫu và mở giao diện).
           files: dist/AutoClipper-Setup-*.exe
