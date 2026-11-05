@@ -4,6 +4,7 @@ import contextlib, datetime, glob, io, json, os, re, shutil, sys, threading
 import numpy as np
 
 from . import config, llm, offline, tools
+from .downloader import Downloader, DownloadError
 from .engine import analyze_video, fetch_video, render_clips, transcribe
 
 
@@ -59,6 +60,8 @@ class Job:
 
     def cancel(self):
         self.cancel_flag.set()
+        if getattr(self, "dl", None):
+            self.dl.kill()
 
     def _check(self):
         if self.cancel_flag.is_set():
@@ -83,7 +86,7 @@ class Job:
     def run(self):
         cfg, log = self.cfg, self.log
         self.progress(0.02, "Chuẩn bị công cụ...")
-        tools.ensure(log)
+        self.tools = tools.ensure(log)
         self._check()
 
         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -97,10 +100,15 @@ class Job:
         if is_url(self.source):
             self.progress(0.05, "Đang tải video...")
             log(f"Tải video: {self.source}")
-            _run(fetch_video, [self.source, "--out-dir", work], log)
-            video = os.path.join(work, "source.mp4")
-            info = json.load(open(os.path.join(work, "source_info.json"), encoding="utf-8"))
-            subs = info.get("subtitle_file")
+            self.dl = Downloader(self.tools["yt-dlp"], self.tools["deno"], os.path.dirname(self.tools["ffmpeg"]),
+                                 log, lambda f, t: self.progress(0.05 + 0.10 * f, t), self.cancel_flag.is_set)
+            try:
+                video, subs, info = self.dl.download(self.source, work, browser=cfg.get("browser") or None)
+            except DownloadError as e:
+                raise JobError(str(e))
+            if subs:
+                log(f"Có phụ đề {'của kênh' if info.get('subtitle_kind') == 'manual' else 'tự động của YouTube'}: "
+                    f"{os.path.basename(subs)}")
         else:
             video = self.source
             if not os.path.isfile(video):
@@ -222,7 +230,14 @@ class Job:
             argv.append("--uppercase")
         if not cfg.get("hook", True):
             argv.append("--no-hook")
-        _run(render_clips, argv, log)
+        n_clips, seen = len(spec), [0]
+
+        def render_log(line):
+            log(line)
+            if line.strip().startswith("[clip_"):
+                seen[0] += 1
+                self.progress(0.65 + 0.33 * (seen[0] - 1) / n_clips, f"Đang dựng clip {seen[0]}/{n_clips}...")
+        _run(render_clips, argv, render_log)
         shutil.rmtree(os.path.join(out, "_fonts"), ignore_errors=True)
         for f in glob.glob(os.path.join(out, "*_hook.png")) + glob.glob(os.path.join(out, "*.ass")):
             os.remove(f)

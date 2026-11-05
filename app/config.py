@@ -94,6 +94,7 @@ DEFAULTS = {
     "hook": True,
     "whisper_model": "small",
     "output_dir": "",
+    "browser": "",                    # "" | firefox | chrome | edge | brave - YouTube login fallback
 }
 
 

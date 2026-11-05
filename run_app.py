@@ -18,6 +18,8 @@ if os.name == "nt":
     class _NoWindowPopen(_Popen):
         def __init__(self, *args, **kwargs):
             kwargs.setdefault("creationflags", 0x08000000)  # CREATE_NO_WINDOW
+            # a windowed app has no usable stdin; child tools (yt-dlp, deno, ffmpeg) can hang reading it
+            kwargs.setdefault("stdin", subprocess.DEVNULL)
             super().__init__(*args, **kwargs)
 
     subprocess.Popen = _NoWindowPopen
@@ -80,6 +82,15 @@ def selftest(out_dir):
             v = next(s for s in probe["streams"] if s["codec_type"] == "video")
             assert (v["width"], v["height"]) == (1080, 1920), (v["width"], v["height"])
             log(f"clip ok: {os.path.basename(c['file'])} {c['length']}s")
+        # real download on this machine (informational: CI servers are sometimes blocked by YouTube)
+        try:
+            from app.downloader import Downloader, DownloadError
+            t = tools.ensure(log)
+            d = Downloader(t["yt-dlp"], t["deno"], os.path.dirname(t["ffmpeg"]), log, lambda f, s: None, lambda: False)
+            v, sub, info = d.download("https://www.youtube.com/watch?v=jNQXAC9IVRw", os.path.join(out_dir, "dl"))
+            log(f"download ok: {os.path.getsize(v) >> 10} KB, subs={bool(sub)}, title={info.get('title')}")
+        except Exception as e:
+            log(f"download check (non-fatal): {e}")
         # the window must open and close cleanly
         from app.main import App
         app = App()

@@ -1,5 +1,5 @@
-"""Auto Clipper desktop app - paste a link or pick a file, get vertical clips."""
-import os, queue, subprocess, sys, threading, webbrowser
+"""Auto Clipper desktop app - CapCut-style UI: paste a link or pick a file, get vertical clips."""
+import glob, json, os, queue, subprocess, sys, threading, time, webbrowser
 
 import customtkinter as ctk
 
@@ -7,17 +7,34 @@ from . import config, llm
 from .pipeline import Job, is_url
 
 APP_TITLE = "Auto Clipper"
-PROVIDER_LABELS = {"offline": "Offline (không cần AI)", "claude": "Claude", "openai": "ChatGPT", "gemini": "Gemini"}
+VERSION = "1.1"
+
+# ---- palette (dark, cyan accent - CapCut desktop feel) ----
+BG = "#0E0F12"
+SIDEBAR = "#141519"
+CARD = "#1B1C21"
+CARD2 = "#24252C"
+BORDER = "#2E3038"
+TEXT = "#F3F4F6"
+MUTED = "#9CA0AB"
+ACCENT = "#22D3EE"
+ACCENT_HOVER = "#0FB8D2"
+ACCENT_TEXT = "#03161A"
+DANGER = "#F87171"
+OK = "#4ADE80"
+
+PROVIDERS = [("offline", "Offline"), ("claude", "Claude"), ("openai", "ChatGPT"), ("gemini", "Gemini")]
 KEY_LINKS = {"claude": "https://console.anthropic.com/settings/keys",
              "openai": "https://platform.openai.com/api-keys",
              "gemini": "https://aistudio.google.com/apikey"}
-LENGTH_LABELS = {"15-30": "15-30 giây", "30-60": "30-60 giây", "60-90": "60-90 giây"}
-LANG_LABELS = {"auto": "Theo video", "vi": "Tiếng Việt", "en": "English"}
-FRAMING_LABELS = {"auto": "Tự động theo từng cảnh", "center": "Luôn cắt giữa", "blur": "Giữ khung + nền mờ"}
-COLORS = {"Vàng": "FFE600", "Xanh ngọc": "00E5FF", "Hồng": "FF4FA3", "Xanh lá": "5BFF6B", "Trắng": "FFFFFF"}
-NUM_LABELS = ["Tự động"] + [str(i) for i in range(1, 11)]
-
-ACCENT = "#E8C500"
+NUMS = [("0", "Tự động"), ("1", "1"), ("3", "3"), ("5", "5"), ("8", "8"), ("10", "10")]
+LENGTHS = [("15-30", "15–30s"), ("30-60", "30–60s"), ("60-90", "60–90s")]
+FRAMINGS = [("auto", "Tự động"), ("center", "Cắt giữa"), ("blur", "Nền mờ")]
+LANGS = [("auto", "Theo video"), ("vi", "Tiếng Việt"), ("en", "English")]
+BROWSERS = [("", "Không dùng"), ("firefox", "Firefox"), ("chrome", "Chrome"), ("edge", "Edge"), ("brave", "Brave")]
+COLORS = ["FFE600", "22D3EE", "FF4FA3", "5BFF6B", "FFFFFF"]
+STEPS = ["Tải video", "Chép lời", "Phân tích hình ảnh", "Chọn đoạn hay", "Lên khung từng cảnh", "Dựng clip"]
+STEP_AT = [0.0, 0.15, 0.30, 0.45, 0.55, 0.65]
 
 
 def open_path(p):
@@ -29,30 +46,12 @@ def open_path(p):
         subprocess.Popen(["xdg-open", p])
 
 
-def _inv(d, label):
-    return next(k for k, v in d.items() if v == label)
+def label_of(pairs, key):
+    return dict(pairs).get(key, pairs[0][1])
 
 
-class Section(ctk.CTkFrame):
-    def __init__(self, master, title):
-        super().__init__(master, corner_radius=10)
-        self.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(self, text=title, font=ctk.CTkFont(size=14, weight="bold")).grid(
-            row=0, column=0, columnspan=3, sticky="w", padx=14, pady=(10, 4))
-        self.row = 1
-
-    def add(self, label, widget, extra=None):
-        if label:
-            ctk.CTkLabel(self, text=label).grid(row=self.row, column=0, sticky="w", padx=(14, 8), pady=5)
-            col, span, left = 1, 1 if extra else 2, 0
-        else:  # no label: use the full width
-            col, span, left = 0, 2 if extra else 3, 14
-        widget.grid(row=self.row, column=col, columnspan=span, sticky="ew",
-                    padx=(left, 14 if not extra else 6), pady=5)
-        if extra:
-            extra.grid(row=self.row, column=2, sticky="e", padx=(0, 14), pady=5)
-        self.row += 1
-        return widget
+def key_of(pairs, label):
+    return next((k for k, v in pairs if v == label), pairs[0][0])
 
 
 class App(ctk.CTk):
@@ -60,9 +59,11 @@ class App(ctk.CTk):
         super().__init__()
         ctk.set_appearance_mode("dark")
         self.cfg = config.load()
+        self.F = self._font_family()
         self.title(APP_TITLE)
-        self.geometry("1180x780")
-        self.minsize(980, 640)
+        self.geometry("1280x820")
+        self.minsize(1080, 700)
+        self.configure(fg_color=BG)
         try:
             ico = config.resource_path("assets", "icon.ico")
             if os.name == "nt" and os.path.exists(ico):
@@ -71,174 +72,468 @@ class App(ctk.CTk):
             pass
         self.q = queue.Queue()
         self.job = None
-        self.grid_columnconfigure(0, weight=0, minsize=470)
+        self.last_result = None
+        self._thumbs = []
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
-        self._build_left()
-        self._build_right()
-        self._load_provider()
+        self._build_sidebar()
+        self.pages = {}
+        self._build_create()
+        self._build_projects()
+        self._build_settings()
+        self.show("create")
         self.after(100, self._poll)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    # ---------------- layout ----------------
-    def _build_left(self):
-        left = ctk.CTkScrollableFrame(self, width=450, corner_radius=0, fg_color="transparent")
-        left.grid(row=0, column=0, sticky="nsew", padx=(12, 6), pady=12)
-        left.grid_columnconfigure(0, weight=1)
+    # ---------------- helpers ----------------
+    def _font_family(self):
+        try:
+            import tkinter.font as tkfont
+            fams = set(tkfont.families(self))
+        except Exception:
+            fams = set()
+        for f in ("Segoe UI Variable Display", "Segoe UI", "Inter", "SF Pro Display", "Helvetica Neue"):
+            if f in fams:
+                return f
+        return None
 
-        s = Section(left, "1. Video")
-        s.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        self.src = ctk.CTkEntry(s, placeholder_text="Dán link YouTube / Facebook / TikTok, hoặc chọn file")
-        s.add(None, self.src, ctk.CTkButton(s, text="Chọn file...", width=90, command=self._pick_file))
+    def font(self, size=13, weight="normal"):
+        return ctk.CTkFont(family=self.F, size=size, weight=weight) if self.F else ctk.CTkFont(size=size, weight=weight)
 
-        s = Section(left, "2. AI chọn đoạn hay")
-        s.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-        self.provider = s.add("Dùng", ctk.CTkOptionMenu(s, values=list(PROVIDER_LABELS.values()),
-                                                         command=lambda _: self._on_provider()))
-        self.key = ctk.CTkEntry(s, show="•", placeholder_text="API key")
-        self.key_toggle = ctk.CTkButton(s, text="Hiện", width=60, command=self._toggle_key)
-        s.add("API key", self.key, self.key_toggle)
-        self.model = ctk.CTkComboBox(s, values=[""])
-        s.add("Model", self.model, ctk.CTkButton(s, text="Tải danh sách", width=100, command=self._load_models))
-        self.key_link = ctk.CTkLabel(s, text="", text_color=ACCENT, cursor="hand2", anchor="w")
-        self.key_link.bind("<Button-1>", lambda _: webbrowser.open(KEY_LINKS.get(self._provider(), "")))
-        s.add(None, self.key_link)
-        self.ai_note = ctk.CTkLabel(s, text="", wraplength=410, justify="left", anchor="w", text_color="gray70")
-        s.add(None, self.ai_note)
+    def card(self, master, **kw):
+        return ctk.CTkFrame(master, fg_color=CARD, corner_radius=16, border_width=1, border_color=BORDER, **kw)
 
-        s = Section(left, "3. Clip")
-        s.grid(row=2, column=0, sticky="ew", pady=(0, 10))
-        self.num = s.add("Số clip", ctk.CTkOptionMenu(s, values=NUM_LABELS))
-        self.num.set(NUM_LABELS[self.cfg["num_clips"]] if 0 <= self.cfg["num_clips"] <= 10 else "Tự động")
-        self.length = s.add("Độ dài", ctk.CTkOptionMenu(s, values=list(LENGTH_LABELS.values())))
-        self.length.set(LENGTH_LABELS.get(self.cfg["length"], "30-60 giây"))
-        self.topic = s.add("Chỉ lấy", ctk.CTkEntry(s, placeholder_text="VD: đoạn hài hước, nói về marketing (để trống = hay nhất)"))
+    def h(self, master, text, size=15):
+        return ctk.CTkLabel(master, text=text, font=self.font(size, "bold"), text_color=TEXT, anchor="w")
+
+    def muted(self, master, text, size=12, **kw):
+        return ctk.CTkLabel(master, text=text, font=self.font(size), text_color=MUTED, anchor="w", justify="left", **kw)
+
+    def seg(self, master, pairs, value, command=None):
+        s = ctk.CTkSegmentedButton(master, values=[v for _, v in pairs], font=self.font(13), height=34,
+                                   fg_color=CARD2, unselected_color=CARD2, unselected_hover_color=BORDER,
+                                   selected_color=ACCENT, selected_hover_color=ACCENT_HOVER,
+                                   text_color=TEXT, corner_radius=10, command=command)
+        s.set(label_of(pairs, value))
+        return s
+
+    def button(self, master, text, command, primary=False, **kw):
+        if primary:
+            return ctk.CTkButton(master, text=text, command=command, fg_color=ACCENT, hover_color=ACCENT_HOVER,
+                                 text_color=ACCENT_TEXT, font=self.font(15, "bold"), corner_radius=12, **kw)
+        return ctk.CTkButton(master, text=text, command=command, fg_color=CARD2, hover_color=BORDER,
+                             text_color=TEXT, font=self.font(13), corner_radius=10, border_width=1,
+                             border_color=BORDER, **kw)
+
+    # ---------------- sidebar ----------------
+    def _build_sidebar(self):
+        sb = ctk.CTkFrame(self, fg_color=SIDEBAR, corner_radius=0, width=220)
+        sb.grid(row=0, column=0, sticky="ns")
+        sb.grid_propagate(False)
+        sb.grid_rowconfigure(10, weight=1)
+        logo = ctk.CTkFrame(sb, fg_color="transparent")
+        logo.grid(row=0, column=0, sticky="ew", padx=18, pady=(22, 26))
+        try:
+            from PIL import Image
+            im = Image.open(config.resource_path("assets", "icon.png"))
+            self._logo = ctk.CTkImage(im, im, size=(34, 34))
+            ctk.CTkLabel(logo, image=self._logo, text="").grid(row=0, column=0, padx=(0, 10))
+        except Exception:
+            pass
+        ctk.CTkLabel(logo, text="Auto Clipper", font=self.font(18, "bold"), text_color=TEXT).grid(row=0, column=1)
+        self.nav = {}
+        for i, (key, text) in enumerate((("create", "✂   Tạo clip"), ("projects", "▦   Dự án"),
+                                         ("settings", "⚙   Cài đặt")), start=1):
+            b = ctk.CTkButton(sb, text=text, anchor="w", height=42, corner_radius=10, font=self.font(14),
+                              fg_color="transparent", hover_color=CARD2, text_color=MUTED,
+                              command=lambda k=key: self.show(k))
+            b.grid(row=i, column=0, sticky="ew", padx=12, pady=3)
+            self.nav[key] = b
+        self.muted(sb, f"Phiên bản {VERSION}\nXử lý ngay trên máy bạn", 11).grid(row=11, column=0, sticky="w",
+                                                                                   padx=20, pady=18)
+
+    def show(self, key):
+        for k, page in self.pages.items():
+            page.grid_remove() if k != key else page.grid(row=0, column=1, sticky="nsew")
+        for k, b in self.nav.items():
+            b.configure(fg_color=CARD2 if k == key else "transparent", text_color=TEXT if k == key else MUTED)
+        if key == "projects":
+            self._refresh_projects()
+
+    # ---------------- create page ----------------
+    def _build_create(self):
+        page = ctk.CTkScrollableFrame(self, fg_color=BG, corner_radius=0)
+        page.grid_columnconfigure(0, weight=1)
+        self.pages["create"] = page
+        wrap = ctk.CTkFrame(page, fg_color="transparent")
+        wrap.grid(row=0, column=0, sticky="ew", padx=36, pady=(30, 30))
+        wrap.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(wrap, text="Biến video dài thành clip ngắn", font=self.font(28, "bold"),
+                     text_color=TEXT, anchor="w").grid(row=0, column=0, sticky="w")
+        self.muted(wrap, "Dán link hoặc tải file lên. AI chọn đoạn hay, tự đổi khung 9:16, gắn phụ đề và tiêu đề hook.",
+                   14).grid(row=1, column=0, sticky="w", pady=(4, 18))
+
+        # input bar
+        bar = self.card(wrap)
+        bar.grid(row=2, column=0, sticky="ew")
+        bar.grid_columnconfigure(0, weight=1)
+        self.src = ctk.CTkEntry(bar, height=52, corner_radius=12, border_width=0, fg_color=CARD2,
+                                font=self.font(15), text_color=TEXT,
+                                placeholder_text="Dán link YouTube, TikTok, Facebook...", placeholder_text_color=MUTED)
+        self.src.grid(row=0, column=0, sticky="ew", padx=(12, 8), pady=12)
+        self.src.bind("<Return>", lambda _: self._start())
+        self.button(bar, "Tải file lên", self._pick_file, height=52, width=140).grid(row=0, column=1, padx=(0, 8))
+        self.go = self.button(bar, "Tạo clip  →", self._start, primary=True, height=52, width=160)
+        self.go.grid(row=0, column=2, padx=(0, 12))
+
+        # options
+        opt = self.card(wrap)
+        opt.grid(row=3, column=0, sticky="ew", pady=(14, 0))
+        opt.grid_columnconfigure((0, 1), weight=1, uniform="opt")
+
+        def row(r, c, title, widget, span=1):
+            self.muted(opt, title, 12).grid(row=r * 2, column=c, sticky="w", padx=18, pady=(14 if r == 0 else 6, 4))
+            widget.grid(row=r * 2 + 1, column=c, columnspan=span, sticky="ew", padx=18, pady=(0, 8))
+
+        self.provider = self.seg(opt, PROVIDERS, self.cfg.get("provider", "offline"), lambda _: self._provider_hint())
+        row(0, 0, "AI chọn đoạn", self.provider)
+        self.num = self.seg(opt, NUMS, str(self.cfg.get("num_clips", 0)))
+        row(0, 1, "Số clip", self.num)
+        self.length = self.seg(opt, LENGTHS, self.cfg.get("length", "30-60"))
+        row(1, 0, "Độ dài mỗi clip", self.length)
+        self.framing = self.seg(opt, FRAMINGS, self.cfg.get("framing", "auto"))
+        row(1, 1, "Khung dọc 9:16", self.framing)
+        self.topic = ctk.CTkEntry(opt, height=38, corner_radius=10, border_width=0, fg_color=CARD2, font=self.font(13),
+                                  text_color=TEXT, placeholder_text="Ví dụ: những đoạn hài hước, đoạn nói về marketing "
+                                                                    "(để trống = đoạn hay nhất)",
+                                  placeholder_text_color=MUTED)
         if self.cfg.get("topic"):
             self.topic.insert(0, self.cfg["topic"])
-        self.lang = s.add("Ngôn ngữ chữ", ctk.CTkOptionMenu(s, values=list(LANG_LABELS.values())))
-        self.lang.set(LANG_LABELS.get(self.cfg["language"], "Theo video"))
+        row(2, 0, "Chỉ lấy đoạn về (không bắt buộc)", self.topic, span=2)
 
-        s = Section(left, "4. Hình & phụ đề")
-        s.grid(row=3, column=0, sticky="ew", pady=(0, 10))
-        self.framing = s.add("Khung dọc", ctk.CTkOptionMenu(s, values=list(FRAMING_LABELS.values())))
-        self.framing.set(FRAMING_LABELS.get(self.cfg["framing"], FRAMING_LABELS["auto"]))
-        self.color = s.add("Màu chữ nhấn", ctk.CTkOptionMenu(s, values=list(COLORS)))
-        self.color.set(next((k for k, v in COLORS.items() if v == self.cfg.get("highlight")), "Vàng"))
-        row = ctk.CTkFrame(s, fg_color="transparent")
-        self.cap = ctk.CTkCheckBox(row, text="Phụ đề")
-        self.upper = ctk.CTkCheckBox(row, text="IN HOA")
-        self.hook = ctk.CTkCheckBox(row, text="Tiêu đề hook")
-        for i, (w, k) in enumerate(((self.cap, "captions"), (self.upper, "uppercase"), (self.hook, "hook"))):
-            w.grid(row=0, column=i, padx=(0, 14))
-            (w.select if self.cfg.get(k, True) else w.deselect)()
-        s.add(None, row)
+        style = ctk.CTkFrame(opt, fg_color="transparent")
+        row(3, 0, "Phong cách phụ đề", style, span=2)
+        self.color = self.cfg.get("highlight", "FFE600")
+        self.swatches = {}
+        for i, c in enumerate(COLORS):
+            b = ctk.CTkButton(style, text="", width=28, height=28, corner_radius=14, fg_color=f"#{c}",
+                              hover_color=f"#{c}", border_width=3, command=lambda c=c: self._pick_color(c))
+            b.grid(row=0, column=i, padx=(0, 8))
+            self.swatches[c] = b
+        self._pick_color(self.color)
+        self.cap = self._switch(style, "Phụ đề", self.cfg.get("captions", True), 6)
+        self.upper = self._switch(style, "IN HOA", self.cfg.get("uppercase", True), 7)
+        self.hook = self._switch(style, "Tiêu đề hook", self.cfg.get("hook", True), 8)
+        self.hint = self.muted(opt, "", 12)
+        self.hint.grid(row=8, column=0, columnspan=2, sticky="w", padx=18, pady=(2, 14))
+        self._provider_hint()
 
-        s = Section(left, "5. Nâng cao")
-        s.grid(row=4, column=0, sticky="ew", pady=(0, 10))
-        self.whisper = s.add("Chép lời (Whisper)", ctk.CTkOptionMenu(s, values=["small", "medium", "large-v3"]))
-        self.whisper.set(self.cfg.get("whisper_model", "small"))
-        self.outdir = ctk.CTkEntry(s)
-        self.outdir.insert(0, self.cfg["output_dir"])
-        s.add("Lưu vào", self.outdir, ctk.CTkButton(s, text="Đổi...", width=60, command=self._pick_out))
-
-    def _build_right(self):
-        right = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
-        right.grid(row=0, column=1, sticky="nsew", padx=(6, 12), pady=12)
-        right.grid_columnconfigure(0, weight=1)
-        right.grid_rowconfigure(3, weight=1)
-
-        top = ctk.CTkFrame(right, fg_color="transparent")
-        top.grid(row=0, column=0, sticky="ew")
+        # progress card (hidden until a job runs)
+        self.prog = self.card(wrap)
+        self.prog.grid_columnconfigure(0, weight=1)
+        top = ctk.CTkFrame(self.prog, fg_color="transparent")
+        top.grid(row=0, column=0, sticky="ew", padx=20, pady=(18, 6))
         top.grid_columnconfigure(0, weight=1)
-        self.go = ctk.CTkButton(top, text="▶  Tạo clip", height=46, font=ctk.CTkFont(size=16, weight="bold"),
-                                fg_color=ACCENT, text_color="black", hover_color="#c9a900", command=self._start)
-        self.go.grid(row=0, column=0, sticky="ew")
-        self.stop = ctk.CTkButton(top, text="Huỷ", width=80, height=46, state="disabled", command=self._cancel,
-                                  fg_color="gray30")
-        self.stop.grid(row=0, column=1, padx=(8, 0))
-
-        self.bar = ctk.CTkProgressBar(right, progress_color=ACCENT)
+        self.status = ctk.CTkLabel(top, text="", font=self.font(16, "bold"), text_color=TEXT, anchor="w", justify="left", wraplength=640)
+        self.status.grid(row=0, column=0, sticky="w")
+        self.pct = ctk.CTkLabel(top, text="0%", font=self.font(16, "bold"), text_color=ACCENT)
+        self.pct.grid(row=0, column=1, padx=10)
+        self.stop = self.button(top, "Huỷ", self._cancel, width=80, height=32)
+        self.stop.grid(row=0, column=2)
+        self.bar = ctk.CTkProgressBar(self.prog, height=8, corner_radius=4, progress_color=ACCENT, fg_color=CARD2)
         self.bar.set(0)
-        self.bar.grid(row=1, column=0, sticky="ew", pady=(12, 4))
-        self.status = ctk.CTkLabel(right, text="Sẵn sàng. Dán link hoặc chọn file video rồi bấm Tạo clip.", anchor="w")
-        self.status.grid(row=2, column=0, sticky="ew")
+        self.bar.grid(row=1, column=0, sticky="ew", padx=20, pady=(4, 12))
+        steps = ctk.CTkFrame(self.prog, fg_color="transparent")
+        steps.grid(row=2, column=0, sticky="ew", padx=14)
+        self.step_lbl = []
+        for i, s in enumerate(STEPS):
+            l = ctk.CTkLabel(steps, text=f"○  {s}", font=self.font(13), text_color=MUTED)
+            l.grid(row=0, column=i, padx=6, pady=2, sticky="w")
+            self.step_lbl.append(l)
+        det = ctk.CTkFrame(self.prog, fg_color="transparent")
+        det.grid(row=3, column=0, sticky="ew", padx=20, pady=(6, 14))
+        self.det_btn = ctk.CTkButton(det, text="Chi tiết ▾", width=90, height=26, fg_color="transparent",
+                                     hover_color=CARD2, text_color=MUTED, font=self.font(12), command=self._toggle_log)
+        self.det_btn.grid(row=0, column=0, sticky="w")
+        self.logbox = ctk.CTkTextbox(self.prog, height=220, fg_color="#0B0C0F", corner_radius=10, text_color="#C9CDD6",
+                                     font=ctk.CTkFont(family="Consolas" if os.name == "nt" else "monospace", size=12))
+        self.log_visible = False
 
-        tabs = ctk.CTkTabview(right)
-        tabs.grid(row=3, column=0, sticky="nsew", pady=(8, 0))
-        self.tab_res = tabs.add("Kết quả")
-        self.tab_log = tabs.add("Nhật ký")
-        self.tab_res.grid_columnconfigure(0, weight=1)
-        self.tab_res.grid_rowconfigure(0, weight=1)
-        self.results = ctk.CTkScrollableFrame(self.tab_res, fg_color="transparent")
-        self.results.grid(row=0, column=0, sticky="nsew")
-        self.results.grid_columnconfigure(0, weight=1)
-        self.open_out = ctk.CTkButton(self.tab_res, text="Mở thư mục clip", state="disabled", command=self._open_out)
-        self.open_out.grid(row=1, column=0, sticky="e", pady=(6, 0))
-        self.tab_log.grid_columnconfigure(0, weight=1)
-        self.tab_log.grid_rowconfigure(0, weight=1)
-        self.logbox = ctk.CTkTextbox(self.tab_log, font=ctk.CTkFont(family="Consolas", size=12))
-        self.logbox.grid(row=0, column=0, sticky="nsew")
-        self.tabs = tabs
-        self._empty_results("Clip sẽ hiện ở đây sau khi xử lý xong.")
+        # results
+        self.res = ctk.CTkFrame(wrap, fg_color="transparent")
+        self.res.grid_columnconfigure(0, weight=1)
+        self.wrap = wrap
 
-    # ---------------- provider / key / model ----------------
-    def _provider(self):
-        return _inv(PROVIDER_LABELS, self.provider.get())
+    def _switch(self, master, text, on, col):
+        s = ctk.CTkSwitch(master, text=text, font=self.font(13), text_color=TEXT, progress_color=ACCENT,
+                          button_color=TEXT, button_hover_color=TEXT, fg_color=BORDER)
+        (s.select if on else s.deselect)()
+        s.grid(row=0, column=col, padx=(18 if col == 6 else 10, 0))
+        return s
 
-    def _load_provider(self):
-        self.provider.set(PROVIDER_LABELS.get(self.cfg.get("provider"), PROVIDER_LABELS["offline"]))
-        self._prev_provider = self._provider()
-        self._on_provider(save_prev=False)
+    def _pick_color(self, c):
+        self.color = c
+        for k, b in self.swatches.items():
+            b.configure(border_color=TEXT if k == c else CARD)
 
-    def _on_provider(self, save_prev=True):
-        if save_prev:
-            self._stash_provider_fields(self._prev_provider)
-        p = self._provider()
-        self._prev_provider = p
-        ai = p != "offline"
-        for w in (self.key, self.model, self.key_toggle):
-            w.configure(state="normal" if ai else "disabled")
-        self.key.delete(0, "end")
-        if ai:
-            self.key.insert(0, config.get_key(self.cfg, p))
+    def _provider_hint(self):
+        p = key_of(PROVIDERS, self.provider.get())
+        if p == "offline":
+            self.hint.configure(text="Offline: miễn phí, chọn đoạn theo âm lượng, chuyển động và câu mở đầu. "
+                                     "Dùng AI để có đoạn chọn, hook và caption hay hơn.", text_color=MUTED)
+        elif not config.get_key(self.cfg, p):
+            self.hint.configure(text=f"Chưa có API key {label_of(PROVIDERS, p)} — vào Cài đặt để thêm.",
+                                text_color=DANGER)
+        else:
+            m = self.cfg["models"].get(p) or "(chưa chọn model)"
+            self.hint.configure(text=f"Dùng {label_of(PROVIDERS, p)} · model {m} · trả phí theo lượt dùng.",
+                                text_color=MUTED)
+
+    def _toggle_log(self):
+        self.log_visible = not self.log_visible
+        if self.log_visible:
+            self.logbox.grid(row=4, column=0, sticky="ew", padx=20, pady=(0, 16))
+            self.det_btn.configure(text="Chi tiết ▴")
+        else:
+            self.logbox.grid_remove()
+            self.det_btn.configure(text="Chi tiết ▾")
+
+    def _set_step(self, frac, failed=False):
+        cur = max(i for i, a in enumerate(STEP_AT) if frac >= a)
+        for i, l in enumerate(self.step_lbl):
+            if frac >= 1.0 or i < cur:
+                l.configure(text=f"✓  {STEPS[i]}", text_color=OK)
+            elif i == cur:
+                l.configure(text=f"{'✕' if failed else '●'}  {STEPS[i]}", text_color=DANGER if failed else ACCENT)
+            else:
+                l.configure(text=f"○  {STEPS[i]}", text_color=MUTED)
+
+    # ---------------- results ----------------
+    def _thumb(self, path, score, length, w=168):
+        from PIL import Image, ImageDraw, ImageFont, ImageOps
+        h = int(w * 16 / 9)
+        try:
+            im = ImageOps.fit(Image.open(path).convert("RGB"), (w * 2, h * 2))
+        except Exception:
+            im = Image.new("RGB", (w * 2, h * 2), CARD2)
+        d = ImageDraw.Draw(im)
+        try:
+            f = ImageFont.truetype(config.resource_path("assets", "fonts", "Inter-ExtraBold.otf"), 30)
+        except Exception:
+            f = ImageFont.load_default()
+        badge = str(score)
+        bw = int(d.textlength(badge, font=f)) + 28
+        H2 = h * 2
+        d.rounded_rectangle([14, H2 - 58, 14 + bw, H2 - 14], radius=14, fill=ACCENT)
+        d.text((28, H2 - 54), badge, font=f, fill=ACCENT_TEXT)
+        dur = f"{int(length) // 60}:{int(length) % 60:02d}"
+        tw = int(d.textlength(dur, font=f)) + 24
+        d.rounded_rectangle([w * 2 - 14 - tw, h * 2 - 58, w * 2 - 14, h * 2 - 14], radius=12, fill=(0, 0, 0))
+        d.text((w * 2 - 14 - tw + 12, h * 2 - 54), dur, font=f, fill=(255, 255, 255))
+        mask = Image.new("L", im.size, 0)
+        ImageDraw.Draw(mask).rounded_rectangle([0, 0, im.width - 1, im.height - 1], radius=28, fill=255)
+        im = im.convert("RGBA")
+        im.putalpha(mask)
+        img = ctk.CTkImage(im, im, size=(w, h))
+        self._thumbs.append(img)
+        return img
+
+    def _show_results(self, res):
+        for w in self.res.winfo_children():
+            w.destroy()
+        self._thumbs = []
+        self.last_result = res
+        head = ctk.CTkFrame(self.res, fg_color="transparent")
+        head.grid(row=0, column=0, sticky="ew", pady=(22, 10))
+        head.grid_columnconfigure(0, weight=1)
+        self.h(head, f"Kết quả · {len(res['clips'])} clip", 20).grid(row=0, column=0, sticky="w")
+        self.button(head, "Mở thư mục", lambda: open_path(res["out_dir"]), height=36, width=120).grid(row=0, column=1)
+        grid = ctk.CTkFrame(self.res, fg_color="transparent")
+        grid.grid(row=1, column=0, sticky="ew")
+        cols = 4
+        for c in range(cols):
+            grid.grid_columnconfigure(c, weight=1, uniform="clips")
+        clips = sorted(res["clips"], key=lambda c: -c["score"]["total"])
+        for i, c in enumerate(clips):
+            card = ctk.CTkFrame(grid, fg_color=CARD, corner_radius=16, border_width=1, border_color=BORDER)
+            card.grid(row=i // cols, column=i % cols, sticky="nsew", padx=6, pady=6)
+            card.grid_columnconfigure(0, weight=1)
+            img = self._thumb(c["thumb"], c["score"]["total"], c["length"])
+            pic = ctk.CTkButton(card, image=img, text="", fg_color="transparent", hover_color=CARD2,
+                                command=lambda p=c["file"]: open_path(p))
+            pic.grid(row=0, column=0, padx=10, pady=(10, 6))
+            ctk.CTkLabel(card, text=c["title"], font=self.font(13, "bold"), text_color=TEXT, wraplength=190,
+                         justify="left", anchor="w").grid(row=1, column=0, sticky="ew", padx=14)
+            if c.get("hook_title"):
+                self.muted(card, f"Hook: {c['hook_title']}", 11, wraplength=190).grid(row=2, column=0, sticky="ew",
+                                                                                     padx=14, pady=(2, 0))
+            btns = ctk.CTkFrame(card, fg_color="transparent")
+            btns.grid(row=3, column=0, sticky="ew", padx=10, pady=(8, 12))
+            btns.grid_columnconfigure((0, 1), weight=1)
+            ctk.CTkButton(btns, text="▶ Xem", height=30, corner_radius=8, fg_color=ACCENT, hover_color=ACCENT_HOVER,
+                          text_color=ACCENT_TEXT, font=self.font(12, "bold"),
+                          command=lambda p=c["file"]: open_path(p)).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+            cap = (c.get("captions") or {}).get("TikTok") or c["title"]
+            tags = " ".join(c.get("hashtags") or [])
+            self.button(btns, "Copy caption", lambda t=f"{cap}\n{tags}".strip(): self._copy(t), height=30
+                        ).grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        self.res.grid(row=5, column=0, sticky="ew")
+
+    def _copy(self, text):
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.status.configure(text="Đã copy caption vào bộ nhớ tạm.")
+
+    # ---------------- projects page ----------------
+    def _build_projects(self):
+        page = ctk.CTkScrollableFrame(self, fg_color=BG, corner_radius=0)
+        page.grid_columnconfigure(0, weight=1)
+        self.pages["projects"] = page
+        ctk.CTkLabel(page, text="Dự án", font=self.font(28, "bold"), text_color=TEXT, anchor="w").grid(
+            row=0, column=0, sticky="w", padx=36, pady=(30, 4))
+        self.muted(page, "Các lần tạo clip trước đây, mới nhất ở trên.", 14).grid(row=1, column=0, sticky="w", padx=36)
+        self.proj_list = ctk.CTkFrame(page, fg_color="transparent")
+        self.proj_list.grid(row=2, column=0, sticky="ew", padx=30, pady=16)
+        self.proj_list.grid_columnconfigure(0, weight=1)
+
+    def _refresh_projects(self):
+        for w in self.proj_list.winfo_children():
+            w.destroy()
+        root = self.cfg.get("output_dir") or config.default_output_dir()
+        items = sorted(glob.glob(os.path.join(root, "*", "clips_rendered.json")), key=os.path.getmtime, reverse=True)
+        if not items:
+            self.muted(self.proj_list, "Chưa có dự án nào. Tạo clip đầu tiên ở mục Tạo clip.", 14).grid(
+                row=0, column=0, sticky="w", padx=6, pady=20)
+            return
+        self._proj_thumbs = []
+        for i, p in enumerate(items[:50]):
+            d = os.path.dirname(p)
+            try:
+                data = json.load(open(p, encoding="utf-8"))
+            except Exception:
+                continue
+            row = self.card(self.proj_list)
+            row.grid(row=i, column=0, sticky="ew", pady=5)
+            row.grid_columnconfigure(1, weight=1)
+            thumb = os.path.join(d, data["rendered"][0]["thumb"]) if data.get("rendered") else ""
+            try:
+                from PIL import Image, ImageOps
+                im = ImageOps.fit(Image.open(thumb).convert("RGB"), (54, 96))
+                img = ctk.CTkImage(im, im, size=(54, 96))
+                self._proj_thumbs.append(img)
+                ctk.CTkLabel(row, image=img, text="").grid(row=0, column=0, rowspan=2, padx=14, pady=12)
+            except Exception:
+                pass
+            name = os.path.basename(d).rsplit("-", 2)[0].replace("-", " ")
+            self.h(row, name, 15).grid(row=0, column=1, sticky="sw", pady=(16, 0))
+            when = time.strftime("%d/%m/%Y %H:%M", time.localtime(os.path.getmtime(p)))
+            self.muted(row, f"{len(data.get('rendered', []))} clip · {when}", 12).grid(row=1, column=1, sticky="nw")
+            res = {"out_dir": d, "clips": [{**c, "file": os.path.join(d, r["file"]), "thumb": os.path.join(d, r["thumb"]),
+                                            "length": r["length"]} for c, r in zip(data["clips"], data["rendered"])]}
+            self.button(row, "Xem clip", lambda r=res: (self._show_results(r), self.show("create")),
+                        width=100, height=34).grid(row=0, column=2, rowspan=2, padx=6)
+            self.button(row, "Mở thư mục", lambda dd=d: open_path(dd), width=110, height=34).grid(row=0, column=3, rowspan=2,
+                                                                                         padx=(0, 14))
+
+    # ---------------- settings page ----------------
+    def _build_settings(self):
+        page = ctk.CTkScrollableFrame(self, fg_color=BG, corner_radius=0)
+        page.grid_columnconfigure(0, weight=1)
+        self.pages["settings"] = page
+        ctk.CTkLabel(page, text="Cài đặt", font=self.font(28, "bold"), text_color=TEXT, anchor="w").grid(
+            row=0, column=0, sticky="w", padx=36, pady=(30, 16))
+
+        ai = self.card(page)
+        ai.grid(row=1, column=0, sticky="ew", padx=36, pady=(0, 14))
+        ai.grid_columnconfigure(1, weight=1)
+        self.h(ai, "Tài khoản AI").grid(row=0, column=0, columnspan=4, sticky="w", padx=20, pady=(16, 2))
+        self.muted(ai, "API key được mã hoá trên máy bạn và chỉ gửi tới nhà cung cấp tương ứng.", 12).grid(
+            row=1, column=0, columnspan=4, sticky="w", padx=20, pady=(0, 8))
+        self.keys, self.models, self.key_status = {}, {}, {}
+        r = 2
+        for p, name in PROVIDERS[1:]:
+            ctk.CTkLabel(ai, text=name, font=self.font(14, "bold"), text_color=TEXT, width=90, anchor="w").grid(
+                row=r, column=0, sticky="w", padx=20, pady=6)
+            e = ctk.CTkEntry(ai, show="•", height=36, corner_radius=10, border_width=0, fg_color=CARD2,
+                             font=self.font(13), text_color=TEXT, placeholder_text="API key")
+            e.insert(0, config.get_key(self.cfg, p))
+            e.grid(row=r, column=1, sticky="ew", pady=6)
+            e.bind("<FocusOut>", lambda _e, p=p: self._save_settings())
+            self.keys[p] = e
             models = llm.DEFAULT_MODELS.get(p) or []
             cur = self.cfg["models"].get(p) or (models[0] if models else "")
-            self.model.configure(values=models or [cur or ""])
-            self.model.set(cur)
-            self.key_link.configure(text=f"Lấy API key {PROVIDER_LABELS[p]} ↗")
-            self.ai_note.configure(text="AI chọn đoạn, chấm điểm viral, viết hook và caption. Bạn trả phí cho "
-                                        "nhà cung cấp theo lượt dùng (thường vài trăm đến vài nghìn đồng mỗi video).")
-        else:
-            self.model.set("")
-            self.key_link.configure(text="")
-            self.ai_note.configure(text="Miễn phí, không cần mạng cho bước chọn đoạn. Chọn theo âm lượng, chuyển động "
-                                        "và câu mở đầu; kém tinh tế hơn AI.")
+            m = ctk.CTkComboBox(ai, values=models or [cur], height=36, width=230, corner_radius=10, border_width=0,
+                                fg_color=CARD2, button_color=BORDER, font=self.font(13), dropdown_font=self.font(13),
+                                command=lambda _v: self._save_settings())
+            m.set(cur)
+            m.grid(row=r, column=2, padx=8, pady=6)
+            self.models[p] = m
+            self.button(ai, "Tải model", lambda p=p: self._load_models(p), width=96, height=36).grid(row=r, column=3,
+                                                                                                     padx=(0, 20))
+            r += 1
+            link = ctk.CTkLabel(ai, text=f"Lấy API key {name} ↗", font=self.font(12), text_color=ACCENT,
+                                cursor="hand2", anchor="w")
+            link.bind("<Button-1>", lambda _e, p=p: webbrowser.open(KEY_LINKS[p]))
+            link.grid(row=r, column=1, sticky="w")
+            st = self.muted(ai, "", 12)
+            st.grid(row=r, column=2, columnspan=2, sticky="w", padx=8)
+            self.key_status[p] = st
+            r += 1
+        self.key_status[p].grid_configure(pady=(0, 16))
 
-    def _stash_provider_fields(self, p):
-        if p and p != "offline":
-            config.set_key(self.cfg, p, self.key.get())
-            self.cfg["models"][p] = self.model.get().strip()
+        dl = self.card(page)
+        dl.grid(row=2, column=0, sticky="ew", padx=36, pady=(0, 14))
+        dl.grid_columnconfigure(0, weight=1)
+        self.h(dl, "Tải video").grid(row=0, column=0, sticky="w", padx=20, pady=(16, 2))
+        self.muted(dl, "Khi YouTube đòi đăng nhập ('not a bot', video giới hạn tuổi), dùng phiên đăng nhập YouTube trong "
+                       "trình duyệt của bạn.\nFirefox ổn định nhất. Với Chrome/Edge hãy đóng trình duyệt trước khi tải.",
+                   12).grid(row=1, column=0, sticky="w", padx=20)
+        self.browser = self.seg(dl, BROWSERS, self.cfg.get("browser", ""), lambda _: self._save_settings())
+        self.browser.grid(row=2, column=0, sticky="w", padx=20, pady=(10, 18))
 
-    def _toggle_key(self):
-        hidden = self.key.cget("show") == "•"
-        self.key.configure(show="" if hidden else "•")
-        self.key_toggle.configure(text="Ẩn" if hidden else "Hiện")
+        gen = self.card(page)
+        gen.grid(row=3, column=0, sticky="ew", padx=36, pady=(0, 30))
+        gen.grid_columnconfigure(1, weight=1)
+        self.h(gen, "Chung").grid(row=0, column=0, columnspan=3, sticky="w", padx=20, pady=(16, 8))
+        self.muted(gen, "Ngôn ngữ tiêu đề & caption", 13).grid(row=1, column=0, sticky="w", padx=20, pady=6)
+        self.lang = self.seg(gen, LANGS, self.cfg.get("language", "auto"), lambda _: self._save_settings())
+        self.lang.grid(row=1, column=1, sticky="w", pady=6)
+        self.muted(gen, "Chép lời (Whisper) khi video\nkhông có phụ đề", 13).grid(row=2, column=0, sticky="w", padx=20,
+                                                                                  pady=6)
+        self.whisper = self.seg(gen, [("small", "Nhanh"), ("medium", "Cân bằng"), ("large-v3", "Chính xác nhất")],
+                                self.cfg.get("whisper_model", "small"), lambda _: self._save_settings())
+        self.whisper.grid(row=2, column=1, sticky="w", pady=6)
+        self.muted(gen, "Lưu clip vào", 13).grid(row=3, column=0, sticky="w", padx=20, pady=(6, 18))
+        self.outdir = ctk.CTkEntry(gen, height=36, corner_radius=10, border_width=0, fg_color=CARD2, font=self.font(13),
+                                   text_color=TEXT)
+        self.outdir.insert(0, self.cfg["output_dir"])
+        self.outdir.grid(row=3, column=1, sticky="ew", pady=(6, 18))
+        self.button(gen, "Đổi...", self._pick_out, width=80, height=36).grid(row=3, column=2, padx=20, pady=(6, 18))
 
-    def _load_models(self):
-        p = self._provider()
-        if p == "offline":
-            return
-        key = self.key.get().strip()
-        self.status.configure(text="Đang tải danh sách model...")
+    def _save_settings(self):
+        for p, e in self.keys.items():
+            config.set_key(self.cfg, p, e.get())
+            self.cfg["models"][p] = self.models[p].get().strip()
+        self.cfg["browser"] = key_of(BROWSERS, self.browser.get())
+        self.cfg["language"] = key_of(LANGS, self.lang.get())
+        self.cfg["whisper_model"] = key_of([("small", "Nhanh"), ("medium", "Cân bằng"),
+                                            ("large-v3", "Chính xác nhất")], self.whisper.get())
+        self.cfg["output_dir"] = self.outdir.get().strip() or config.default_output_dir()
+        config.save(self.cfg)
+        self._provider_hint()
+
+    def _load_models(self, p):
+        key = self.keys[p].get().strip()
+        self.key_status[p].configure(text="Đang tải danh sách model...", text_color=MUTED)
 
         def work():
             try:
-                models = llm.list_models(p, key)
-                self.q.put(("models", (p, models)))
+                self.q.put(("models", (p, llm.list_models(p, key), None)))
             except llm.AIError as e:
-                self.q.put(("status", str(e)))
+                self.q.put(("models", (p, None, str(e))))
             except Exception as e:
-                self.q.put(("status", f"Không tải được danh sách model: {e}"))
+                self.q.put(("models", (p, None, f"Lỗi: {e}")))
         threading.Thread(target=work, daemon=True).start()
 
     # ---------------- actions ----------------
@@ -256,98 +551,56 @@ class App(ctk.CTk):
         if p:
             self.outdir.delete(0, "end")
             self.outdir.insert(0, p)
+            self._save_settings()
 
     def _collect_cfg(self):
-        self._stash_provider_fields(self._provider())
+        self._save_settings()
         c = self.cfg
-        c["provider"] = self._provider()
-        n = self.num.get()
-        c["num_clips"] = 0 if n == "Tự động" else int(n)
-        c["length"] = _inv(LENGTH_LABELS, self.length.get())
+        c["provider"] = key_of(PROVIDERS, self.provider.get())
+        c["num_clips"] = int(key_of(NUMS, self.num.get()))
+        c["length"] = key_of(LENGTHS, self.length.get())
+        c["framing"] = key_of(FRAMINGS, self.framing.get())
         c["topic"] = self.topic.get().strip()
-        c["language"] = _inv(LANG_LABELS, self.lang.get())
-        c["framing"] = _inv(FRAMING_LABELS, self.framing.get())
-        c["highlight"] = COLORS[self.color.get()]
+        c["highlight"] = self.color
         c["captions"], c["uppercase"], c["hook"] = bool(self.cap.get()), bool(self.upper.get()), bool(self.hook.get())
-        c["whisper_model"] = self.whisper.get()
-        c["output_dir"] = self.outdir.get().strip() or config.default_output_dir()
         config.save(c)
         return c
 
     def _start(self):
-        src = self.src.get().strip()
-        if not src:
-            self.status.configure(text="Dán link hoặc chọn file video trước.")
+        if self.job:
             return
-        if not is_url(src) and not os.path.isfile(src.strip('"')):
-            self.status.configure(text="Không tìm thấy file. Kiểm tra lại đường dẫn hoặc dán link.")
+        src = self.src.get().strip().strip('"')
+        if not src:
+            self._flash("Dán link hoặc chọn file video trước.")
+            return
+        if not is_url(src) and not os.path.isfile(src):
+            self._flash("Không tìm thấy file. Kiểm tra lại đường dẫn hoặc dán link.")
             return
         cfg = self._collect_cfg()
         if cfg["provider"] != "offline" and not config.get_key(cfg, cfg["provider"]):
-            self.status.configure(text=f"Nhập API key cho {PROVIDER_LABELS[cfg['provider']]} hoặc chọn Offline.")
+            self._flash(f"Chưa có API key {label_of(PROVIDERS, cfg['provider'])}. Vào Cài đặt để thêm, hoặc chọn Offline.")
             return
+        self.res.grid_remove()
         self.logbox.delete("1.0", "end")
-        self._empty_results("Đang xử lý...")
-        self.go.configure(state="disabled")
+        self.prog.grid(row=4, column=0, sticky="ew", pady=(14, 0))
+        self.bar.set(0)
+        self.pct.configure(text="0%")
+        self.status.configure(text="Đang bắt đầu...", text_color=TEXT)
+        self._set_step(0)
+        self.go.configure(state="disabled", text="Đang xử lý...")
         self.stop.configure(state="normal")
-        self.open_out.configure(state="disabled")
-        self.tabs.set("Nhật ký")
-        self.job = Job(src, cfg,
-                       log=lambda m: self.q.put(("log", m)),
+        self.job = Job(src, cfg, log=lambda m: self.q.put(("log", m)),
                        progress=lambda f, t: self.q.put(("progress", (f, t))),
                        done=lambda r, e: self.q.put(("done", (r, e))))
         self.job.start()
 
+    def _flash(self, text):
+        self.hint.configure(text=text, text_color=DANGER)
+
     def _cancel(self):
         if self.job:
             self.job.cancel()
-            self.status.configure(text="Đang huỷ sau bước hiện tại...")
-
-    def _open_out(self):
-        if getattr(self, "last_out", None):
-            open_path(self.last_out)
-
-    # ---------------- results ----------------
-    def _empty_results(self, text):
-        for w in self.results.winfo_children():
-            w.destroy()
-        ctk.CTkLabel(self.results, text=text, text_color="gray60").grid(row=0, column=0, pady=30)
-
-    def _show_results(self, res):
-        from PIL import Image
-        for w in self.results.winfo_children():
-            w.destroy()
-        for i, c in enumerate(sorted(res["clips"], key=lambda c: -c["score"]["total"])):
-            card = ctk.CTkFrame(self.results, corner_radius=10)
-            card.grid(row=i, column=0, sticky="ew", pady=5)
-            card.grid_columnconfigure(1, weight=1)
-            try:
-                im = Image.open(c["thumb"])
-                im.thumbnail((90, 160))
-                ci = ctk.CTkImage(light_image=im, dark_image=im, size=im.size)
-                ctk.CTkLabel(card, image=ci, text="").grid(row=0, column=0, rowspan=3, padx=10, pady=10)
-            except Exception:
-                pass
-            ctk.CTkLabel(card, text=f"{c['score']['total']}", font=ctk.CTkFont(size=22, weight="bold"),
-                         text_color=ACCENT).grid(row=0, column=2, rowspan=2, padx=14)
-            ctk.CTkLabel(card, text=c["title"], font=ctk.CTkFont(size=14, weight="bold"), anchor="w",
-                         wraplength=420, justify="left").grid(row=0, column=1, sticky="ew", pady=(10, 0))
-            ctk.CTkLabel(card, text=f"{c['length']:.0f} giây · {c.get('reason', '')}", anchor="w", wraplength=420,
-                         justify="left", text_color="gray70").grid(row=1, column=1, sticky="ew")
-            btns = ctk.CTkFrame(card, fg_color="transparent")
-            btns.grid(row=2, column=1, sticky="w", pady=(4, 10))
-            ctk.CTkButton(btns, text="Xem", width=70, command=lambda p=c["file"]: open_path(p)).grid(row=0, column=0)
-            cap = c["captions"].get("TikTok") or ""
-            tags = " ".join(c.get("hashtags") or [])
-            ctk.CTkButton(btns, text="Copy caption", width=110, fg_color="gray30",
-                          command=lambda t=f"{cap}\n{tags}".strip(): self._copy(t)).grid(row=0, column=1, padx=6)
-        self.last_out = res["out_dir"]
-        self.open_out.configure(state="normal")
-
-    def _copy(self, text):
-        self.clipboard_clear()
-        self.clipboard_append(text)
-        self.status.configure(text="Đã copy caption.")
+            self.status.configure(text="Đang huỷ...")
 
     # ---------------- queue pump ----------------
     def _poll(self):
@@ -358,33 +611,41 @@ class App(ctk.CTk):
                     self.logbox.insert("end", data + "\n")
                     self.logbox.see("end")
                 elif kind == "progress":
-                    self.bar.set(data[0])
-                    self.status.configure(text=data[1])
-                elif kind == "status":
-                    self.status.configure(text=data)
+                    f, t = data
+                    self.bar.set(f)
+                    self.pct.configure(text=f"{int(f * 100)}%")
+                    self.status.configure(text=t)
+                    self._set_step(f)
                 elif kind == "models":
-                    p, models = data
-                    if p == self._provider() and models:
-                        cur = self.model.get()
-                        self.model.configure(values=models)
-                        self.model.set(cur if cur in models else models[0])
-                        self.status.configure(text=f"Đã tải {len(models)} model. Chọn model rồi bấm Tạo clip.")
-                    elif not models:
-                        self.status.configure(text="Tài khoản không có model phù hợp.")
+                    p, models, err = data
+                    if err:
+                        self.key_status[p].configure(text=err, text_color=DANGER)
+                    elif models:
+                        cur = self.models[p].get()
+                        self.models[p].configure(values=models)
+                        self.models[p].set(cur if cur in models else models[0])
+                        self.key_status[p].configure(text=f"✓ {len(models)} model khả dụng", text_color=OK)
+                        self._save_settings()
+                    else:
+                        self.key_status[p].configure(text="Tài khoản chưa có model phù hợp.", text_color=DANGER)
                 elif kind == "done":
                     res, err = data
-                    self.go.configure(state="normal")
-                    self.stop.configure(state="disabled")
                     self.job = None
+                    self.go.configure(state="normal", text="Tạo clip  →")
+                    self.stop.configure(state="disabled")
                     if err:
-                        self.bar.set(0)
-                        self.status.configure(text=err)
+                        self.status.configure(text=err, text_color=DANGER)
+                        self._set_step(self.bar.get(), failed=True)
                         self.logbox.insert("end", "\n" + err + "\n")
-                        self._empty_results(err)
                     else:
+                        self.bar.set(1)
+                        self.pct.configure(text="100%")
+                        self._set_step(1.0)
+                        self.status.configure(text=f"Xong! Đã tạo {len(res['clips'])} clip.", text_color=OK)
+                        if self.log_visible:
+                            self._toggle_log()
                         self._show_results(res)
-                        self.tabs.set("Kết quả")
-                        self.status.configure(text=f"Xong! {len(res['clips'])} clip. Bấm 'Xem' để mở, hoặc mở thư mục.")
+                        self.after(150, lambda: self.pages["create"]._parent_canvas.yview_moveto(1.0))
         except queue.Empty:
             pass
         self.after(100, self._poll)

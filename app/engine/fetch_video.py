@@ -62,7 +62,8 @@ def ensure_deno():
 def ytdlp(args, capture=True):
     base = [YTDLP_BIN] if YTDLP_BIN else [sys.executable, "-m", "yt_dlp"]
     return subprocess.run([*base, "--no-playlist", "--no-warnings", *JS_RUNTIME, *args],
-                          capture_output=capture, text=True, encoding="utf-8", errors="replace")
+                          capture_output=capture, text=True, encoding="utf-8", errors="replace",
+                          stdin=subprocess.DEVNULL)
 
 
 def explain_failure(stderr):

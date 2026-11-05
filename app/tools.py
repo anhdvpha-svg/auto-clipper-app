@@ -134,7 +134,7 @@ def _maybe_update_ytdlp(bin_path, log):
         return
     log("Đang kiểm tra bản cập nhật yt-dlp...")
     try:
-        subprocess.run([bin_path, "-U"], capture_output=True, timeout=120)
+        subprocess.run([bin_path, "-U"], capture_output=True, stdin=subprocess.DEVNULL, timeout=120)
     except Exception:
         pass
     json.dump({"ytdlp": time.time()}, open(stamp, "w"))
