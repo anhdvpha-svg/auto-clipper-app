@@ -89,7 +89,14 @@ def selftest(out_dir):
                                               capture_output=True, text=True).stdout)
             v = next(s for s in probe["streams"] if s["codec_type"] == "video")
             assert (v["width"], v["height"]) == (1080, 1920), (v["width"], v["height"])
-            log(f"clip ok: {os.path.basename(c['file'])} {c['length']}s")
+            # regression check: audio must be continuous from 0 s (no duplicated/jumping timestamps)
+            pk = subprocess.run([tools._paths()["ffprobe"] if os.path.exists(tools._paths()["ffprobe"]) else "ffprobe",
+                                 "-v", "error", "-select_streams", "a", "-show_entries", "packet=pts_time",
+                                 "-of", "csv=p=0", c["file"]], capture_output=True, text=True).stdout.split()
+            ts = [float(x) for x in pk if x.strip()]
+            gaps = [b - a for a, b in zip(ts, ts[1:]) if b - a > 0.1 or b - a < 0.001]
+            assert ts and ts[0] < 0.05 and not gaps, f"audio timestamps broken: start={ts[:1]} bad={len(gaps)}"
+            log(f"clip ok: {os.path.basename(c['file'])} {c['length']}s, audio continuous ({len(ts)} packets)")
         # real download on this machine (informational: CI servers are sometimes blocked by YouTube)
         try:
             from app.downloader import Downloader, DownloadError
