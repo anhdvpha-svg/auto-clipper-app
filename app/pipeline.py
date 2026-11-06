@@ -230,6 +230,10 @@ class Job:
             argv.append("--uppercase")
         if not cfg.get("hook", True):
             argv.append("--no-hook")
+        # remember how this project was rendered, so the editor can re-render single clips later
+        json.dump({"video": os.path.abspath(video), "work": work, "base_args": [x for i, x in enumerate(argv) if x != "--clips" and not (i and argv[i - 1] == "--clips")],
+                   "transcript": tjson if transcript["segments"] else None},
+                  open(os.path.join(out, "project.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
         n_clips, seen = len(spec), [0]
 
         def render_log(line):
@@ -243,8 +247,8 @@ class Job:
             os.remove(f)
 
         rendered = json.load(open(os.path.join(out, "clips_rendered.json"), encoding="utf-8"))["rendered"]
-        results = [{**c, "file": os.path.join(out, r["file"]), "thumb": os.path.join(out, r["thumb"]),
-                    "length": r["length"]} for c, r in zip(spec, rendered)]
+        results = [{**c, "index": k, "file": os.path.join(out, r["file"]), "thumb": os.path.join(out, r["thumb"]),
+                    "length": r["length"]} for k, (c, r) in enumerate(zip(spec, rendered))]
         self.progress(1.0, "Xong!")
         log(f"Xong! {len(results)} clip trong: {out}")
         return {"out_dir": out, "clips": results, "work_dir": work}

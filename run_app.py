@@ -25,6 +25,14 @@ if os.name == "nt":
     subprocess.Popen = _NoWindowPopen
 
 
+# fonts shipped with the app (hook cards and captions); set before the engine renders anything
+try:
+    _base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    os.environ.setdefault("AUTOCLIPPER_FONTS", os.path.join(_base, "assets", "fonts"))
+except Exception:
+    pass
+
+
 def selftest(out_dir):
     """Download the tools, build a synthetic talking video, run the whole offline pipeline, open the window."""
     import json, threading, time

@@ -82,10 +82,13 @@ def chunk_words(words, max_words, max_chars=22, max_gap=0.6):
     return chunks
 
 
-def build_ass(words, W, H, max_words, highlight_rrggbb, uppercase):
+def build_ass(words, W, H, max_words, highlight_rrggbb, uppercase, size=1.0, y=0.75, chunks=None):
+    """Word-highlighted captions. `chunks` (edited by the user: [{"s","e","text"}] in clip time) replaces the
+    automatic grouping; their words get times spread over the chunk in proportion to word length."""
     rr, gg, bb = highlight_rrggbb[0:2], highlight_rrggbb[2:4], highlight_rrggbb[4:6]
     hl = f"&H00{bb}{gg}{rr}&".upper()
-    fs = int(W * 0.072)
+    fs = int(W * 0.072 * size)
+    margin_v = int(H * (1 - y))  # y = vertical position of the caption baseline (0 top .. 1 bottom)
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {W}
@@ -95,15 +98,29 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Cap,Inter,{fs},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,{max(3, fs // 12)},2,2,60,60,{int(H * 0.25)},1
+Style: Cap,Inter,{fs},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,{max(3, fs // 12)},2,2,60,60,{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
+    if chunks is not None:
+        groups = []
+        for c in chunks:
+            toks = (c.get("text") or "").split()
+            if not toks or c["e"] <= c["s"]:
+                continue
+            total = sum(len(t) + 1 for t in toks)
+            cur, g = c["s"], []
+            for t in toks:
+                d = (c["e"] - c["s"]) * (len(t) + 1) / total
+                g.append({"w": t, "s": cur, "e": cur + d})
+                cur += d
+            groups.append(g)
+    else:
+        groups = chunk_words(words, max_words)
     lines = []
-    chunks = chunk_words(words, max_words)
-    for ci, ch in enumerate(chunks):
-        next_start = chunks[ci + 1][0]["s"] if ci + 1 < len(chunks) else ch[-1]["e"] + 0.5
+    for ci, ch in enumerate(groups):
+        next_start = groups[ci + 1][0]["s"] if ci + 1 < len(groups) else ch[-1]["e"] + 0.5
         texts = [ass_escape(w["w"].upper() if uppercase else w["w"]) for w in ch]
         for i, w in enumerate(ch):
             st = w["s"]
@@ -116,81 +133,99 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     return header + "\n".join(lines) + "\n"
 
 
-# ---------- hook title card (white rounded box, bold black uppercase, top of frame) ----------
+def caption_chunks(clip_words, max_words=4):
+    """The automatic caption lines for a clip, as editable chunks [{"s","e","text"}] (clip time)."""
+    out = []
+    for ch in chunk_words(clip_words, max_words):
+        out.append({"s": round(ch[0]["s"], 3), "e": round(ch[-1]["e"], 3), "text": " ".join(w["w"] for w in ch)})
+    return out
 
-FONTS_DIR = os.environ.get("AUTOCLIPPER_FONTS")  # the desktop app ships Inter here
+
+# ---------- hook title card (OpusClip style: white rounded box, bold black caps, top of frame) ----------
+
+def fonts_dir():
+    return os.environ.get("AUTOCLIPPER_FONTS")  # read at call time: the desktop app sets it after import
 
 
 def find_font(*names):
-    if FONTS_DIR:
-        p = os.path.join(FONTS_DIR, "Inter-ExtraBold.otf")
+    fd = fonts_dir()
+    if fd:
+        p = os.path.join(fd, "Inter-ExtraBold.otf")
         if os.path.exists(p):
             return p
     for n in names:
         try:
             r = subprocess.run(["fc-match", "-f", "%{file}", n], capture_output=True, text=True, encoding="utf-8", errors="replace")
         except FileNotFoundError:  # Windows/macOS without fontconfig tools
-            return None
+            break
         if r.returncode == 0 and r.stdout and os.path.exists(r.stdout):
             return r.stdout
+    for p in (r"C:\Windows\Fonts\seguibl.ttf", r"C:\Windows\Fonts\arialbd.ttf",  # Windows fallbacks
+              "/System/Library/Fonts/Supplemental/Arial Bold.ttf"):
+        if os.path.exists(p):
+            return p
     return None
 
 
-def make_hook_png(text, W, path, uppercase=True):
+HOOK_THEMES = {"light": ((255, 255, 255, 255), (0, 0, 0, 255)),     # white box, black text (OpusClip default)
+               "dark": ((0, 0, 0, 235), (255, 255, 255, 255)),
+               "accent": (None, (0, 0, 0, 255))}                  # box in the highlight colour
+
+
+def make_hook_png(text, W, path, uppercase=True, size=1.0, theme="light", accent="FFE600"):
+    """Line breaks typed by the user are kept; long lines are wrapped to ~3/4 of the frame width."""
     from PIL import Image, ImageDraw, ImageFont
     font_path = find_font("Inter:style=ExtraBold", "Montserrat:style=ExtraBold", "DejaVu Sans:style=Bold")
-    fs = int(W * 0.06)  # matched to OpusClip: box ~3/4 of the frame width, 3-4 short lines
-    font = ImageFont.truetype(font_path, fs) if font_path else ImageFont.load_default()
+    fs = max(20, int(W * 0.062 * size))
+    if font_path:
+        font = ImageFont.truetype(font_path, fs)
+    else:
+        font = ImageFont.load_default(size=fs)  # scalable built-in font (Pillow >= 10.1)
     text = text.upper() if uppercase else text
-    max_w = int(W * 0.68)
-    lines, cur = [], ""
+    max_w = int(W * 0.70)
     d = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
-    for word in text.split():
-        trial = (cur + " " + word).strip()
-        if cur and d.textlength(trial, font=font) > max_w:
-            lines.append(cur)
-            cur = word
-        else:
-            cur = trial
-    if cur:
-        lines.append(cur)
-    # no orphan: if the last line is a single word, pull one word down from the line above
-    if len(lines) > 1 and len(lines[-1].split()) == 1 and len(lines[-2].split()) > 2:
-        prev = lines[-2].split()
-        lines[-2], lines[-1] = " ".join(prev[:-1]), prev[-1] + " " + lines[-1]
-    lh = int(fs * 1.22)
+    lines = []
+    for para in [p for p in text.replace("\\n", "\n").split("\n") if p.strip()]:
+        cur, para_lines = "", []
+        for word in para.split():
+            trial = (cur + " " + word).strip()
+            if cur and d.textlength(trial, font=font) > max_w:
+                para_lines.append(cur)
+                cur = word
+            else:
+                cur = trial
+        if cur:
+            para_lines.append(cur)
+        # no orphan: if the last line is a single word, pull one word down from the line above
+        if len(para_lines) > 1 and len(para_lines[-1].split()) == 1 and len(para_lines[-2].split()) > 2:
+            prev = para_lines[-2].split()
+            para_lines[-2], para_lines[-1] = " ".join(prev[:-1]), prev[-1] + " " + para_lines[-1]
+        lines += para_lines
+    if not lines:
+        return False
+    asc, desc = font.getmetrics()
+    lh = int((asc + desc) * 1.08)
     tw = max(int(d.textlength(l, font=font)) for l in lines)
-    px, py = int(fs * 0.6), int(fs * 0.45)
+    px, py = int(fs * 0.62), int(fs * 0.42)
     bw, bh = tw + 2 * px, lh * len(lines) + 2 * py
+    box, ink = HOOK_THEMES.get(theme, HOOK_THEMES["light"])
+    if box is None:
+        box = tuple(int(accent[i:i + 2], 16) for i in (0, 2, 4)) + (255,)
     img = Image.new("RGBA", (bw, bh), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    d.rounded_rectangle([0, 0, bw - 1, bh - 1], radius=int(fs * 0.3), fill=(255, 255, 255, 255))
+    d.rounded_rectangle([0, 0, bw - 1, bh - 1], radius=int(fs * 0.32), fill=box)
     for i, l in enumerate(lines):
         lw = d.textlength(l, font=font)
-        d.text(((bw - lw) / 2, py + i * lh + (lh - fs) * 0.35), l, font=font, fill=(0, 0, 0, 255))
+        d.text(((bw - lw) / 2, py + i * lh), l, font=font, fill=ink)
     img.save(path)
+    return True
 
 
 # ---------- framing ----------
 
-def layout_chain(k, lay, crop_x, act, W, H):
-    """Filter text taking [s{k}] (already cut to the shot and to the active picture area) to [v{k}]."""
-    aw, ah = act["w"], act["h"]
-    src_ar, target_ar = aw / ah, W / H
-    if lay == "fit" and src_ar > target_ar + 0.01:
-        return (f"[s{k}]split[a{k}][b{k}];"
-                f"[a{k}]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
-                f"gblur=sigma=40,eq=brightness=-0.08[bg{k}];"
-                f"[b{k}]scale={W}:-2[fg{k}];[bg{k}][fg{k}]overlay=(W-w)/2:(H-h)/2,setsar=1[v{k}]")
-    if src_ar > target_ar:
-        cw = int(ah * target_ar) // 2 * 2
-        x = int(max(0, min(aw - cw, crop_x * aw - cw / 2)))
-        return f"[s{k}]crop={cw}:{ah}:{x}:0,scale={W}:{H},setsar=1[v{k}]"
-    return f"[s{k}]scale={W}:-2,crop={W}:{H},setsar=1[v{k}]"
-
-
 def plan_segments(ranges, clip, default_mode, shots):
-    """Split the clip's ranges at shot cuts and give each piece a layout and crop_x."""
+    """Split the clip's ranges at shot cuts and give each piece a layout and crop_x.
+    Pieces always cover each range end to end (gaps take the neighbouring shot's framing)."""
     mode = clip.get("reframe", default_mode)
     overrides = clip.get("layout_overrides") or []
     segs = []
@@ -201,6 +236,7 @@ def plan_segments(ranges, clip, default_mode, shots):
                 a, b = max(s, sh["start"]), min(e, sh["end"])
                 if b - a > 0.04:
                     pieces.append([a, b, sh["layout"], sh["crop_x"], sh])
+            pieces.sort(key=lambda p: p[0])
             if not pieces:
                 pieces = [[s, e, "fill", 0.5, None]]
             # absorb slivers (<0.25 s) into the neighbour so the framing doesn't flicker
@@ -214,6 +250,9 @@ def plan_segments(ranges, clip, default_mode, shots):
                 merged[1][0] = merged[0][0]
                 merged.pop(0)
             pieces = merged
+            pieces[0][0], pieces[-1][1] = s, e
+            for prev, nxt in zip(pieces, pieces[1:]):
+                prev[1] = nxt[0]
         else:
             lay = "fit" if mode == "blur" else "fill"
             pieces = [[s, e, lay, float(clip.get("crop_x", 0.5)), None]]
@@ -228,6 +267,43 @@ def plan_segments(ranges, clip, default_mode, shots):
     return segs
 
 
+def range_chain(k, s, e, pieces, seek, actcrop, act, W, H, fps):
+    """One continuous stream per range; the framing switches at shot cuts inside the stream
+    (time-based crop + overlay enable), so there are no joins to stutter."""
+    aw, ah = act["w"], act["h"]
+    src_ar, target_ar = aw / ah, W / H
+    head = f"[0:v]trim=start={s - seek:.3f}:end={e - seek:.3f},setpts=PTS-STARTPTS,{actcrop}fps={fps},format=yuv420p"
+    rel = [(ps - s, pe - s, lay, cx) for ps, pe, lay, cx in pieces]
+    if src_ar <= target_ar + 0.01:  # already vertical: just fill
+        return f"{head},scale={W}:-2,crop={W}:{H},setsar=1[v{k}]"
+    cw = int(ah * target_ar) // 2 * 2
+
+    def x_of(cx):
+        return int(max(0, min(aw - cw, cx * aw - cw / 2)))
+    fills = [r for r in rel if r[2] != "fit"]
+    fits = [r for r in rel if r[2] == "fit"]
+    if fills:
+        xs = {x_of(r[3]) for r in fills}
+        if len(xs) == 1:
+            xexpr = str(xs.pop())
+        else:
+            xexpr = str(x_of(fills[-1][3]))
+            for a0, b0, _, cx in reversed(fills[:-1]):
+                xexpr = f"if(between(t,{a0:.3f},{b0:.3f}),{x_of(cx)},{xexpr})"
+            xexpr = f"'{xexpr}'"
+        fill = f"crop={cw}:{ah}:{xexpr}:0,scale={W}:{H},setsar=1"
+    fit_bg = (f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},gblur=sigma=40,eq=brightness=-0.08")
+    if not fits:
+        return f"{head},{fill}[v{k}]"
+    fit = (f"split[fa{k}][fb{k}];[fa{k}]{fit_bg}[bg{k}];[fb{k}]scale={W}:-2[fg{k}];"
+           f"[bg{k}][fg{k}]overlay=(W-w)/2:(H-h)/2,setsar=1")
+    if not fills:
+        return f"{head},{fit}[v{k}]"
+    enable = "+".join(f"between(t,{a0:.3f},{b0 - 0.001:.3f})" for a0, b0, _, _ in fills)
+    return (f"{head},split[p{k}][q{k}];[p{k}]{fit}[fit{k}];[q{k}]{fill}[fill{k}];"
+            f"[fit{k}][fill{k}]overlay=0:0:enable='{enable}'[v{k}]")
+
+
 def slugify(text, maxlen=40):
     t = unicodedata.normalize("NFKD", text.replace("đ", "d").replace("Đ", "D"))
     t = "".join(c for c in t if not unicodedata.combining(c)).lower()
@@ -235,58 +311,102 @@ def slugify(text, maxlen=40):
     return t[:maxlen].rstrip("-") or "clip"
 
 
-def render_clip(idx, clip, a, src, words, duration, shots, act):
-    W, H = a.W, a.H
-    raw_ranges = clip.get("ranges") or [[clip["start"], clip["end"]]]
-    ranges = [snap_range(s, e, words, duration) for s, e in raw_ranges]
-    seek = max(0.0, min(s for s, _ in ranges) - 1.0)  # input-seek near the clip, then trim precisely
+def clip_ranges(clip, words, duration):
+    raw = clip.get("ranges") or [[clip["start"], clip["end"]]]
+    return [snap_range(s, e, words, duration) for s, e in raw]
 
-    clip_words, offset = [], 0.0
+
+def clip_words_of(ranges, words):
+    out, offset = [], 0.0
     for s, e in ranges:
         for w in words:
             if w["s"] >= s - 0.05 and w["e"] <= e + 0.05:
-                clip_words.append({"w": w["w"], "s": w["s"] - s + offset, "e": w["e"] - s + offset})
+                out.append({"w": w["w"], "s": w["s"] - s + offset, "e": w["e"] - s + offset})
         offset += e - s
-    total = offset
+    return out, offset
+
+
+def measure_loudness(video, ranges):
+    """Pass 1 of two-pass loudnorm. One-pass (dynamic) loudnorm needs ~3 s of look-ahead and ramps the
+    level at the start of every clip - the first seconds sound quiet or pumping. Measuring first lets
+    pass 2 apply one steady gain (linear mode)."""
+    s, e = min(r[0] for r in ranges), max(r[1] for r in ranges)
+    r = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-ss", f"{s:.3f}", "-t", f"{e - s:.3f}", "-i", video,
+                        "-vn", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json", "-f", "null", "-"],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    m = re.findall(r"\{[^{}]*\"input_i\"[^{}]*\}", r.stderr)
+    if not m:
+        return None
+    try:
+        j = json.loads(m[-1])
+        vals = {k: float(j[k]) for k in ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset")}
+    except (KeyError, ValueError):
+        return None
+    if vals["input_i"] < -70:  # silence: nothing to normalise
+        return None
+    return vals
+
+
+def render_clip(idx, clip, a, src, words, duration, shots, act):
+    W, H = a.W, a.H
+    ranges = clip_ranges(clip, words, duration)
+    seek = max(0.0, min(s for s, _ in ranges) - 1.0)  # input-seek near the clip, then trim precisely
+    clip_words, total = clip_words_of(ranges, words)
 
     segs = plan_segments(ranges, clip, a.reframe, shots)
     actcrop = f"crop={act['w']}:{act['h']}:{act['x']}:{act['y']}," if act["w"] != src["w"] or act["h"] != src["h"] else ""
     parts = []
-    for k, (s, e, lay, cx) in enumerate(segs):
-        parts.append(f"[0:v]trim=start={s - seek:.3f}:end={e - seek:.3f},setpts=PTS-STARTPTS,{actcrop}"
-                     f"fps={a.fps},format=yuv420p[s{k}]")
-        parts.append(layout_chain(k, lay, cx, act, W, H))
-    parts.append("".join(f"[v{k}]" for k in range(len(segs))) + f"concat=n={len(segs)}:v=1:a=0[vc]")
-    last = "[vc]"
+    for k, (s, e) in enumerate(ranges):
+        pieces = [p for p in segs if p[0] >= s - 1e-6 and p[1] <= e + 1e-6]
+        parts.append(range_chain(k, s, e, pieces, seek, actcrop, act, W, H, a.fps))
+    if len(ranges) > 1:
+        parts.append("".join(f"[v{k}]" for k in range(len(ranges))) + f"concat=n={len(ranges)}:v=1:a=0[vc]")
+        last = "[vc]"
+    else:
+        last = "[v0]"
 
     slug = f"clip_{idx:02d}_{slugify(clip.get('title', ''))}"
-    if not a.no_captions and clip_words:
+    cs = clip.get("caption_style") or {}
+    chunks = clip.get("captions_override")
+    show_caps = cs.get("enabled", not a.no_captions) and (clip_words or chunks)
+    if show_caps:
         ass_name = f"{slug}.ass"
         with open(os.path.join(a.out_dir, ass_name), "w", encoding="utf-8") as f:
-            f.write(build_ass(clip_words, W, H, a.words_per_line, a.highlight, a.uppercase))
+            f.write(build_ass(clip_words, W, H, a.words_per_line, cs.get("highlight", a.highlight).lstrip("#"),
+                              cs.get("uppercase", a.uppercase), size=float(cs.get("size", 1.0)),
+                              y=float(cs.get("y", 0.75)), chunks=chunks))
         fontsdir = ""
-        if FONTS_DIR and os.path.isdir(FONTS_DIR):
+        fd = fonts_dir()
+        if fd and os.path.isdir(fd):
             # copy the fonts next to the .ass so the filter path needs no escaping (Windows "C:" etc.)
             local = os.path.join(a.out_dir, "_fonts")
             os.makedirs(local, exist_ok=True)
-            for fn in os.listdir(FONTS_DIR):
+            for fn in os.listdir(fd):
                 if fn.lower().endswith((".otf", ".ttf")) and not os.path.exists(os.path.join(local, fn)):
-                    shutil.copy(os.path.join(FONTS_DIR, fn), local)
+                    shutil.copy(os.path.join(fd, fn), local)
             fontsdir = ":fontsdir=_fonts"
         parts.append(f"{last}ass={ass_name}{fontsdir}[vcap]")
         last = "[vcap]"
 
     extra_inputs = []
     hook = clip.get("hook_title")
-    if hook and not a.no_hook:
-        hs = min(float(clip.get("hook_seconds", 4.0)), total)
+    hs_style = clip.get("hook_style") or {}
+    if hook and not a.no_hook and hs_style.get("enabled", True):
+        secs = hs_style.get("seconds", clip.get("hook_seconds", 4.0))
+        hs = total if secs in (None, "all", 0) else min(float(secs), total)
         png = f"{slug}_hook.png"
-        make_hook_png(hook, W, os.path.join(a.out_dir, png))
-        extra_inputs = ["-loop", "1", "-t", f"{hs:.2f}", "-i", png]
-        parts.append(f"[1:v]format=rgba,fade=in:st=0:d=0.25:alpha=1,"
-                     f"fade=out:st={max(0, hs - 0.3):.2f}:d=0.3:alpha=1[ttl]")
-        parts.append(f"{last}[ttl]overlay=(W-w)/2:{int(H * 0.04)}:eof_action=pass[vh]")
-        last = "[vh]"
+        if make_hook_png(hook, W, os.path.join(a.out_dir, png), uppercase=hs_style.get("uppercase", True),
+                         size=float(hs_style.get("size", 1.0)), theme=hs_style.get("theme", "light"),
+                         accent=a.highlight):
+            from PIL import Image
+            bh = Image.open(os.path.join(a.out_dir, png)).height
+            pos = hs_style.get("position", "top")
+            y = {"top": int(H * 0.06), "middle": int((H - bh) / 2), "bottom": int(H * 0.60 - bh)}.get(pos, int(H * 0.06))
+            extra_inputs = ["-loop", "1", "-t", f"{hs:.2f}", "-i", png]
+            fade_out = f",fade=out:st={max(0, hs - 0.3):.2f}:d=0.3:alpha=1" if hs < total - 0.05 else ""
+            parts.append(f"[1:v]format=rgba,fade=in:st=0:d=0.25:alpha=1{fade_out}[ttl]")
+            parts.append(f"{last}[ttl]overlay=(W-w)/2:{y}:eof_action=pass[vh]")
+            last = "[vh]"
 
     if not a.no_fade and total > 2:
         parts.append(f"{last}fade=out:st={total - 0.3:.3f}:d=0.3[vf]")
@@ -298,7 +418,12 @@ def render_clip(idx, clip, a, src, words, duration, shots, act):
             parts.append(f"[0:a]atrim=start={s - seek:.3f}:end={e - seek:.3f},asetpts=PTS-STARTPTS[ar{k}]")
         chain = "".join(f"[ar{k}]" for k in range(len(ranges))) + f"concat=n={len(ranges)}:v=0:a=1"
         if not a.no_loudnorm:
-            chain += ",loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000"
+            m = measure_loudness(os.path.abspath(a.video), ranges)
+            if m:
+                chain += (f",loudnorm=I=-14:TP=-1.5:LRA=11:measured_I={m['input_i']}:measured_TP={m['input_tp']}:"
+                          f"measured_LRA={m['input_lra']}:measured_thresh={m['input_thresh']}:"
+                          f"offset={m['target_offset']}:linear=true")
+        chain += ",aresample=48000,afade=t=in:d=0.03"
         if not a.no_fade and total > 2:
             chain += f",afade=t=out:st={total - 0.3:.3f}:d=0.3"
         parts.append(chain + "[aout]")

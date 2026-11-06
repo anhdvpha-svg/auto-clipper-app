@@ -144,6 +144,27 @@ def _keywords(text, k=4):
     return [fold(w) for w, _ in Counter(words).most_common(k)]
 
 
+def clean_title(t):
+    """'Call of Duty MW4 - Official Warzone Trailer (4K) [HD]' -> 'Call of Duty MW4'."""
+    t = re.sub(r"[\(\[][^)\]]*[\)\]]", " ", t or "")
+    t = re.split(r"\s[-|–—:]\s|\s#", t)[0]
+    t = re.sub(r"\b(official|trailer|video|teaser|full|hd|4k|mv|lyrics?)\b", " ", t, flags=re.I)
+    return re.sub(r"\s+", " ", t).strip(" -|,.") or (t or "").strip()
+
+
+def _hook(text, n=8):
+    """A hook line without a trailing '...': whole sentence if short, else cut at a natural break."""
+    words = re.sub(r"\s+", " ", text).strip().split()
+    if len(words) <= n:
+        return " ".join(words).rstrip(",.;:")
+    cut = words[:n]
+    for i in range(n - 1, 2, -1):          # prefer ending after a comma / clause word
+        if cut[i].endswith((",", ";", ":")):
+            cut = cut[:i + 1]
+            break
+    return " ".join(cut).rstrip(",.;:")
+
+
 def _short(text, n=8):
     words = re.sub(r"\s+", " ", text).strip().split()
     s = " ".join(words[:n])
@@ -154,12 +175,12 @@ def _make_clip(c, total, kind, opts):
     first = c.get("first") or ""
     if kind == "talk":
         title = _short(first, 10) or "Clip"
-        hook = _short(first, 7)
+        hook = _hook(first, 8)
         tags = ["#" + w for w in _keywords(c["text"])] + ["#shorts"]
         reason = "Chọn tự động (offline): câu mở đầu có tín hiệu hút người xem, lời nói dày, âm lượng cao."
     else:
-        title = opts.get("video_title") or "Highlight"
-        hook = _short(opts.get("video_title") or "Đoạn cao trào nhất", 7)
+        title = clean_title(opts.get("video_title")) or "Highlight"
+        hook = _hook(title, 8) or "Đoạn cao trào nhất"
         tags = ["#" + w for w in _keywords(opts.get("video_title") or "")] + ["#highlight", "#shorts"]
         reason = "Chọn tự động (offline): đoạn ồn và nhiều chuyển động nhất."
     caption = title

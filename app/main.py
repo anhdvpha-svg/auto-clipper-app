@@ -7,7 +7,7 @@ from . import config, llm
 from .pipeline import Job, is_url
 
 APP_TITLE = "Auto Clipper"
-VERSION = "1.1"
+VERSION = "1.2"
 
 # ---- palette (dark, cyan accent - CapCut desktop feel) ----
 BG = "#0E0F12"
@@ -70,6 +70,9 @@ class App(ctk.CTk):
                 self.iconbitmap(ico)
         except Exception:
             pass
+        self.theme = {"BG": BG, "CARD": CARD, "CARD2": CARD2, "BORDER": BORDER, "TEXT": TEXT, "MUTED": MUTED,
+                      "ACCENT": ACCENT, "ACCENT_HOVER": ACCENT_HOVER}
+        self.open_path = open_path
         self.q = queue.Queue()
         self.job = None
         self.last_result = None
@@ -370,15 +373,38 @@ class App(ctk.CTk):
                                                                                      padx=14, pady=(2, 0))
             btns = ctk.CTkFrame(card, fg_color="transparent")
             btns.grid(row=3, column=0, sticky="ew", padx=10, pady=(8, 12))
-            btns.grid_columnconfigure((0, 1), weight=1)
+            btns.grid_columnconfigure((0, 1, 2), weight=1)
             ctk.CTkButton(btns, text="▶ Xem", height=30, corner_radius=8, fg_color=ACCENT, hover_color=ACCENT_HOVER,
                           text_color=ACCENT_TEXT, font=self.font(12, "bold"),
-                          command=lambda p=c["file"]: open_path(p)).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+                          command=lambda p=c["file"]: open_path(p)).grid(row=0, column=0, sticky="ew", padx=(0, 3))
+            self.button(btns, "✎ Sửa", lambda i=c.get("index", i): self._edit(res["out_dir"], i), height=30, width=60
+                        ).grid(row=0, column=1, sticky="ew", padx=3)
             cap = (c.get("captions") or {}).get("TikTok") or c["title"]
             tags = " ".join(c.get("hashtags") or [])
-            self.button(btns, "Copy caption", lambda t=f"{cap}\n{tags}".strip(): self._copy(t), height=30
-                        ).grid(row=0, column=1, sticky="ew", padx=(4, 0))
+            self.button(btns, "Copy", lambda t=f"{cap}\n{tags}".strip(): self._copy(t), height=30, width=60
+                        ).grid(row=0, column=2, sticky="ew", padx=(3, 0))
         self.res.grid(row=5, column=0, sticky="ew")
+
+    def _edit(self, out_dir, index):
+        from .editor import ClipEditor, ProjectError
+        try:
+            ClipEditor(self, out_dir, index, self._on_edited)
+        except ProjectError as e:
+            self.status.configure(text=str(e), text_color=DANGER)
+        except Exception as e:
+            self.status.configure(text=f"Không mở được trình chỉnh sửa: {e}", text_color=DANGER)
+
+    def _on_edited(self, index, clip, rendered):
+        res = self.last_result
+        if not res:
+            return
+        d = res["out_dir"]
+        for c in res["clips"]:
+            if c.get("index") == index:
+                c.update(clip)
+                c.update(file=os.path.join(d, rendered["file"]), thumb=os.path.join(d, rendered["thumb"]),
+                         length=rendered["length"])
+        self._show_results(res)
 
     def _copy(self, text):
         self.clipboard_clear()
@@ -429,8 +455,9 @@ class App(ctk.CTk):
             self.h(row, name, 15).grid(row=0, column=1, sticky="sw", pady=(16, 0))
             when = time.strftime("%d/%m/%Y %H:%M", time.localtime(os.path.getmtime(p)))
             self.muted(row, f"{len(data.get('rendered', []))} clip · {when}", 12).grid(row=1, column=1, sticky="nw")
-            res = {"out_dir": d, "clips": [{**c, "file": os.path.join(d, r["file"]), "thumb": os.path.join(d, r["thumb"]),
-                                            "length": r["length"]} for c, r in zip(data["clips"], data["rendered"])]}
+            res = {"out_dir": d, "clips": [{**c, "index": k, "file": os.path.join(d, r["file"]),
+                                            "thumb": os.path.join(d, r["thumb"]), "length": r["length"]}
+                                           for k, (c, r) in enumerate(zip(data["clips"], data["rendered"]))]}
             self.button(row, "Xem clip", lambda r=res: (self._show_results(r), self.show("create")),
                         width=100, height=34).grid(row=0, column=2, rowspan=2, padx=6)
             self.button(row, "Mở thư mục", lambda dd=d: open_path(dd), width=110, height=34).grid(row=0, column=3, rowspan=2,
