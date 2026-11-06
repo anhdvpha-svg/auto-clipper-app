@@ -123,6 +123,16 @@ def from_subtitles(path):
     return None, segs
 
 
+def load_audio(path, sr=16000):
+    """Mono float32 PCM at 16 kHz - the input Whisper expects."""
+    import numpy as np
+    r = subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-i", path, "-vn", "-ac", "1", "-ar", str(sr),
+                        "-f", "f32le", "-"], capture_output=True, stdin=subprocess.DEVNULL)
+    if r.returncode != 0 or not r.stdout:
+        sys.exit("Could not decode the audio: " + r.stderr.decode("utf-8", "replace").strip()[-300:])
+    return np.frombuffer(r.stdout, dtype=np.float32).copy()
+
+
 def from_whisper(path, model_name, language):
     try:
         from faster_whisper import WhisperModel
@@ -130,7 +140,9 @@ def from_whisper(path, model_name, language):
         sys.exit("faster-whisper is not installed. Run: pip install faster-whisper  "
                  "(or pass --srt with an existing subtitle file)")
     model = WhisperModel(model_name, device="auto", compute_type="int8")
-    it, info = model.transcribe(path, language=language, word_timestamps=True,
+    # Decode with ffmpeg ourselves: faster-whisper's own decoder (PyAV) breaks across PyAV releases
+    # (e.g. "open() got an unexpected keyword argument 'metadata_errors'").
+    it, info = model.transcribe(load_audio(path), language=language, word_timestamps=True,
                                 vad_filter=True, beam_size=5)
     segs = []
     for s in it:

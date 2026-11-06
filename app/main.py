@@ -7,7 +7,7 @@ from . import config, llm
 from .pipeline import Job, is_url
 
 APP_TITLE = "Auto Clipper"
-VERSION = "1.3"
+VERSION = "1.4"
 
 # ---- palette (dark, cyan accent - CapCut desktop feel) ----
 BG = "#0E0F12"
@@ -27,7 +27,8 @@ PROVIDERS = [("offline", "Offline"), ("claude", "Claude"), ("openai", "ChatGPT")
 KEY_LINKS = {"claude": "https://console.anthropic.com/settings/keys",
              "openai": "https://platform.openai.com/api-keys",
              "gemini": "https://aistudio.google.com/apikey"}
-NUMS = [("0", "Tự động"), ("1", "1"), ("3", "3"), ("5", "5"), ("8", "8"), ("10", "10")]
+NUMS = [("0", "Tự động"), ("3", "3"), ("5", "5"), ("8", "8"), ("10", "10")]
+MAX_CLIPS = 30
 LENGTHS = [("15-30", "15–30s"), ("30-60", "30–60s"), ("60-90", "60–90s")]
 FRAMINGS = [("auto", "Tự động"), ("center", "Cắt giữa"), ("blur", "Nền mờ")]
 LANGS = [("auto", "Theo video"), ("vi", "Tiếng Việt"), ("en", "English")]
@@ -234,8 +235,22 @@ class App(ctk.CTk):
 
         self.provider = self.seg(opt, PROVIDERS, self.cfg.get("provider", "offline"), lambda _: self._provider_hint())
         row(0, 0, "AI chọn đoạn", self.provider)
-        self.num = self.seg(opt, NUMS, str(self.cfg.get("num_clips", 0)))
-        row(0, 1, "Số clip", self.num)
+        numbox = ctk.CTkFrame(opt, fg_color="transparent")
+        numbox.grid_columnconfigure(0, weight=1)
+        saved_n = int(self.cfg.get("num_clips", 0) or 0)
+        preset = str(saved_n) in dict(NUMS)
+        self.num = self.seg(numbox, NUMS, str(saved_n) if preset else "0", lambda _: self._num_preset())
+        if not preset:
+            self.num.set("")
+        self.num.grid(row=0, column=0, sticky="ew")
+        self.num_custom = ctk.CTkEntry(numbox, width=74, height=34, corner_radius=10, border_width=1,
+                                       border_color=BORDER, fg_color=CARD2, font=self.font(13), text_color=TEXT,
+                                       justify="center", placeholder_text="Số khác", placeholder_text_color=MUTED)
+        if not preset:
+            self.num_custom.insert(0, str(saved_n))
+        self.num_custom.grid(row=0, column=1, padx=(8, 0))
+        self.num_custom.bind("<KeyRelease>", lambda _: self._num_typed())
+        row(0, 1, "Số clip", numbox)
         self.length = self.seg(opt, LENGTHS, self.cfg.get("length", "30-60"))
         row(1, 0, "Độ dài mỗi clip", self.length)
         self.framing = self.seg(opt, FRAMINGS, self.cfg.get("framing", "auto"))
@@ -300,6 +315,29 @@ class App(ctk.CTk):
         self.res = ctk.CTkFrame(wrap, fg_color="transparent")
         self.res.grid_columnconfigure(0, weight=1)
         self.wrap = wrap
+
+    def _num_preset(self):
+        self.num_custom.delete(0, "end")
+        self.num_custom.configure(border_color=BORDER)
+
+    def _num_typed(self):
+        t = self.num_custom.get().strip()
+        if not t:
+            self.num.set("Tự động")
+            self.num_custom.configure(border_color=BORDER)
+            return
+        ok = t.isdigit() and 1 <= int(t) <= MAX_CLIPS
+        self.num_custom.configure(border_color=ACCENT if ok else DANGER)
+        if ok:
+            self.num.set("")  # the typed number wins: no preset highlighted
+
+    def _num_value(self):
+        t = self.num_custom.get().strip()
+        if t:
+            if not t.isdigit() or not 1 <= int(t) <= MAX_CLIPS:
+                raise ValueError(f"Số clip phải là số từ 1 đến {MAX_CLIPS}.")
+            return int(t)
+        return int(key_of(NUMS, self.num.get())) if self.num.get() else 0
 
     def _switch(self, master, text, on, col):
         s = ctk.CTkSwitch(master, text=text, font=self.font(13), text_color=TEXT, progress_color=ACCENT,
@@ -756,7 +794,7 @@ class App(ctk.CTk):
         self._save_settings()
         c = self.cfg
         c["provider"] = key_of(PROVIDERS, self.provider.get())
-        c["num_clips"] = int(key_of(NUMS, self.num.get()))
+        c["num_clips"] = self._num_value()
         c["length"] = key_of(LENGTHS, self.length.get())
         c["framing"] = key_of(FRAMINGS, self.framing.get())
         c["topic"] = self.topic.get().strip()
@@ -774,6 +812,11 @@ class App(ctk.CTk):
             return
         if not is_url(src) and not os.path.isfile(src):
             self._flash("Không tìm thấy file. Kiểm tra lại đường dẫn hoặc dán link.")
+            return
+        try:
+            self._num_value()
+        except ValueError as e:
+            self._flash(str(e))
             return
         cfg = self._collect_cfg()
         if cfg["provider"] != "offline" and not config.get_key(cfg, cfg["provider"]):
@@ -840,7 +883,10 @@ class App(ctk.CTk):
                         self.bar.set(1)
                         self.pct.configure(text="100%")
                         self._set_step(1.0)
-                        self.status.configure(text=f"Xong! Đã tạo {len(res['clips'])} clip.", text_color=OK)
+                        msg = f"Xong! Đã tạo {len(res['clips'])} clip."
+                        if res.get("note"):
+                            msg += "\n" + res["note"]
+                        self.status.configure(text=msg, text_color=OK if not res.get("note") else "#FBBF24")
                         if self.log_visible:
                             self._toggle_log()
                         self._show_results(res)

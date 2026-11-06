@@ -49,94 +49,175 @@ def _loudness_at(db, step, s, e):
     return float(np.mean(seg)) if len(seg) else 0.0
 
 
-def select_talk(transcript, opts, db=None, step=0.25):
+def _z(vals):
+    v = np.array(vals, dtype=float)
+    return (v - v.mean()) / (v.std() + 1e-6) if len(v) else v
+
+
+def select_talk(transcript, opts, db=None, step=0.25, exclude=()):
+    """Dense candidate windows (every sentence start x every sentence end that fits the length range)."""
     segs = transcript["segments"]
     lo, hi = opts["min_len"], opts["max_len"]
-    target = (lo + hi) / 2
+    duration = transcript.get("duration") or (segs[-1]["end"] if segs else 0)
     topic = [w for w in fold(opts.get("topic") or "").split() if w not in STOP and len(w) > 2]
     cands = []
     for i, s0 in enumerate(segs):
         txt0 = s0["text"].strip()
-        if not txt0 or txt0.lower().startswith(FILLER_START):
+        if not txt0:
             continue
-        j, text = i, [txt0]
-        while j + 1 < len(segs) and segs[j + 1]["end"] - s0["start"] <= hi:
-            j += 1
-            text.append(segs[j]["text"])
+        filler = txt0.lower().startswith(FILLER_START)
+        text = [txt0]
+        for j in range(i + 1, len(segs)):
             dur = segs[j]["end"] - s0["start"]
+            if dur > hi:
+                break
+            text.append(segs[j]["text"])
+            if dur < lo:
+                continue
+            full = " ".join(text)
             ends_well = bool(re.search(r"[.!?…]$", segs[j]["text"].strip()))
-            if dur >= lo and (ends_well or dur >= target):
-                full = " ".join(text)
-                words = len(full.split())
-                cand = {
-                    "start": s0["start"], "end": segs[j]["end"], "text": full, "first": txt0,
-                    "hook": _hook_score(txt0) * 2 + _hook_score(full) * 0.3,
-                    "density": words / dur,
-                    "loud": _loudness_at(db, step, s0["start"], segs[j]["end"]),
-                    "ends_well": ends_well,
-                    "topic": sum(fold(full).count(w) for w in topic) if topic else 0,
-                }
-                cands.append(cand)
-                if dur >= target and ends_well:
-                    break
-    if not cands:
-        return []
+            cands.append({
+                "start": s0["start"], "end": segs[j]["end"], "text": full, "first": txt0,
+                "hook": _hook_score(txt0) * 2 + _hook_score(full) * 0.3 - (3 if filler else 0),
+                "density": len(full.split()) / dur,
+                "loud": _loudness_at(db, step, s0["start"], segs[j]["end"]),
+                "ends_well": ends_well,
+                "topic": sum(fold(full).count(w) for w in topic) if topic else 0,
+            })
     if topic:
-        matched = [c for c in cands if c["topic"] > 0]
-        if not matched:
+        cands = [c for c in cands if c["topic"] > 0]
+        if not cands:
             return []
-        cands = matched
+    if not cands:  # no sentence span fits the length: fall back to even slices of the video
+        return _name_from_speech(_pick([], np.array([]), opts, duration, kind="talk",
+                                       bounds=sorted({x["start"] for x in segs})), segs, opts)
+    score = 1.0 * _z([c["hook"] for c in cands]) + 0.5 * _z([c["density"] for c in cands]) \
+        + 0.4 * _z([c["loud"] for c in cands]) + (2.0 * _z([c["topic"] for c in cands]) if topic else 0)
+    score = score + np.array([0.4 if c["ends_well"] else -0.4 for c in cands])
+    return _name_from_speech(_pick(cands, score, opts, duration, kind="talk", exclude=exclude,
+                                   bounds=sorted({x["start"] for x in segs} | {x["end"] for x in segs})), segs, opts)
 
-    def z(key):
-        v = np.array([c[key] for c in cands], dtype=float)
-        return (v - v.mean()) / (v.std() + 1e-6)
-    score = 1.0 * z("hook") + 0.5 * z("density") + 0.4 * z("loud") + (2.0 * z("topic") if topic else 0)
-    score += np.array([0.4 if c["ends_well"] else -0.4 for c in cands])
-    return _pick(cands, score, opts, transcript.get("duration") or segs[-1]["end"], kind="talk")
+
+def _name_from_speech(clips, segs, opts):
+    """Clips added by even slicing have no opening line yet: use the first sentence spoken inside them."""
+    out = []
+    for c in clips:
+        if not c.get("opening_line"):
+            inside = [x for x in segs if x["start"] >= c["start"] - 0.2 and x["end"] <= c["end"] + 0.2 and
+                      x["text"].strip()]
+            if inside:
+                fresh = _make_clip({"start": c["start"], "end": c["end"], "first": inside[0]["text"].strip(),
+                                    "text": " ".join(x["text"] for x in inside)}, c["score"]["total"], "talk", opts)
+                c = {**c, **{k: fresh[k] for k in ("title", "hook_title", "opening_line", "caption_tiktok",
+                                                   "caption_reels", "caption_shorts", "hashtags")}}
+        out.append(c)
+    return out
 
 
-def select_visual(highlights, shots, opts, duration):
-    """highlights: list of (score, start, end); clip lengths fitted to opts and snapped to shot cuts."""
-    lo, hi = opts["min_len"], min(opts["max_len"], 30)
-    cuts = sorted({s["start"] for s in shots} | {s["end"] for s in shots})
+def select_visual(highlights, shots, opts, duration, exclude=()):
+    """Dense windows over the whole video, cut on shot boundaries, scored by loudness/motion/cut rate.
+    `highlights` (the most intense stretches) add a bonus."""
+    lo, hi = opts["min_len"], opts["max_len"]
+    if not shots:
+        shots = [{"start": t, "end": min(duration, t + 2.0), "loud_db": -30.0, "motion": 0.0}
+                 for t in np.arange(0, duration, 2.0)]
+    starts = [s["start"] for s in shots]
+    loud = _z([s.get("loud_db", -30) for s in shots])
+    motion = _z([s.get("motion", 0) for s in shots]) if np.std([s.get("motion", 0) for s in shots]) > 0 \
+        else np.zeros(len(shots))
+    inten = loud + motion
     cands = []
-    for sc, s, e in highlights:
-        if e - s > hi:  # keep the loudest part: centre the window on the stretch
-            mid = (s + e) / 2
-            s, e = mid - hi / 2, mid + hi / 2
-        if e - s < lo:
-            e = min(duration, s + lo)
-        if cuts:
-            s = min(cuts, key=lambda c: abs(c - s))
-            later = [c for c in cuts if c >= e - 1.5]
-            e = later[0] if later else e
-        if e - s >= max(5, lo * 0.6):
-            cands.append({"start": s, "end": e, "text": "", "first": "", "raw": sc})
-    if not cands:
-        return []
-    score = np.array([c["raw"] for c in cands])
-    return _pick(cands, score, opts, duration, kind="visual")
+    for i in range(len(shots)):
+        for j in range(i, len(shots)):
+            dur = shots[j]["end"] - shots[i]["start"]
+            if dur > hi:
+                break
+            if dur < lo:
+                continue
+            w = np.array([shots[k]["end"] - shots[k]["start"] for k in range(i, j + 1)])
+            mean_int = float((inten[i:j + 1] * w).sum() / w.sum())
+            cuts = (j - i + 1) / dur * 10
+            bonus = sum(sc for sc, hs, he in highlights if hs < shots[j]["end"] and he > shots[i]["start"]) * 0.3
+            cands.append({"start": shots[i]["start"], "end": shots[j]["end"], "text": "", "first": "",
+                          "raw": mean_int + 0.15 * cuts + bonus})
+    if not cands:  # video shorter than the minimum length: one clip of everything
+        cands = [{"start": 0.0, "end": duration, "text": "", "first": "", "raw": 0.0}]
+    return _pick(cands, np.array([c["raw"] for c in cands]), opts, duration, kind="visual", exclude=exclude,
+                 bounds=sorted(set(starts) | {s["end"] for s in shots}))
 
 
-def _pick(cands, score, opts, duration, kind):
+def _overlaps(c, others):
+    return any(not (c["end"] <= d["start"] or c["start"] >= d["end"]) for d in others)
+
+
+def _pick(cands, score, opts, duration, kind, exclude=(), bounds=()):
+    """Best-scoring non-overlapping windows; if that leaves fewer than asked, tile the free time evenly."""
     n = opts["num_clips"] or max(1, min(10, round(duration / 60 / 6)))
+    taken = [{"start": a, "end": b} for a, b in exclude]
     order = np.argsort(-score)
     chosen = []
     for idx in order:
         c = cands[idx]
-        if all(c["end"] <= d["start"] or c["start"] >= d["end"] for d in chosen):
+        if not _overlaps(c, chosen + taken):
             c["z"] = float(score[idx])
             chosen.append(c)
         if len(chosen) >= n:
             break
+    if len(chosen) < n and opts.get("num_clips"):
+        chosen = _fill_by_tiling(cands, score, chosen, taken, n, opts, duration, bounds)
+    if not chosen:
+        return []
     zs = [c["z"] for c in chosen]
     zmax, zmin = max(zs), min(zs)
     out = []
     for c in chosen:
         rel = (c["z"] - zmin) / (zmax - zmin + 1e-6) if len(chosen) > 1 else 0.7
-        total = int(round(55 + 30 * rel))
-        out.append(_make_clip(c, total, kind, opts))
+        out.append(_make_clip(c, int(round(55 + 30 * rel)), kind, opts))
     return out
+
+
+def _fill_by_tiling(cands, score, chosen, taken, n, opts, duration, bounds):
+    """Greedy picking fragments the timeline. When the user asked for N clips, cut the free time into
+    equal slices (on sentence/shot boundaries) and keep the best-scoring windows inside each slice."""
+    lo = opts["min_len"]
+    free, cur = [], 0.0
+    for b in sorted(taken, key=lambda x: x["start"]):
+        if b["start"] - cur >= lo:
+            free.append((cur, b["start"]))
+        cur = max(cur, b["end"])
+    if duration - cur >= lo:
+        free.append((cur, duration))
+    capacity = sum(int((e - s) // lo) for s, e in free)
+    k = min(n, capacity)
+    if k <= len(chosen):
+        return chosen
+    # distribute k slices over the free intervals in proportion to their length
+    total = sum(e - s for s, e in free)
+    slices = []
+    for s, e in free:
+        m = max(1, round(k * (e - s) / total)) if total else 1
+        m = min(m, int((e - s) // lo))
+        step = (e - s) / m if m else 0
+        slices += [(s + i * step, s + (i + 1) * step) for i in range(m)]
+    snap = (lambda t: min(bounds, key=lambda b: abs(b - t))) if bounds else (lambda t: t)
+    result = []
+    zmin = float(np.min(score)) if len(score) else 0.0
+    for s, e in slices[:k]:
+        # slices never overlap each other, so anything kept strictly inside a slice can't overlap either
+        inside = [(score[i], c) for i, c in enumerate(cands) if c["start"] >= s - 1e-6 and c["end"] <= e + 1e-6]
+        if inside:
+            sc, c = max(inside, key=lambda x: x[0])
+            c = dict(c, z=float(sc))
+        else:
+            a, b = snap(s), snap(e)  # prefer sentence/shot boundaries, but stay inside the slice
+            a = a if s - 1e-6 <= a < e else s
+            b = b if a < b <= e + 1e-6 else e
+            if b - a < lo * 0.8:
+                a, b = s, e
+            c = {"start": a, "end": b, "text": "", "first": "", "z": zmin}
+        if not _overlaps(c, result + taken):
+            result.append(c)
+    return result if len(result) > len(chosen) else chosen
 
 
 def _keywords(text, k=4):

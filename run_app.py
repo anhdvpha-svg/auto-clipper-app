@@ -97,6 +97,16 @@ def selftest(out_dir):
             gaps = [b - a for a, b in zip(ts, ts[1:]) if b - a > 0.1 or b - a < 0.001]
             assert ts and ts[0] < 0.05 and not gaps, f"audio timestamps broken: start={ts[:1]} bad={len(gaps)}"
             log(f"clip ok: {os.path.basename(c['file'])} {c['length']}s, audio continuous ({len(ts)} packets)")
+        # Whisper must work in the frozen app (model download + our ffmpeg decoder + ctranslate2)
+        from app.engine import transcribe
+        wd = os.path.join(out_dir, "whisper")
+        try:
+            transcribe.main([video, "--out-dir", wd, "--model", "tiny", "--language", "en"])
+        except SystemExit as e:
+            if e.code not in (None, 0):
+                raise RuntimeError(f"whisper failed: {e.code}")
+        assert os.path.exists(os.path.join(wd, "transcript.json")), "whisper wrote no transcript"
+        log("whisper ok")
         # real download on this machine (informational: CI servers are sometimes blocked by YouTube)
         try:
             from app.downloader import Downloader, DownloadError

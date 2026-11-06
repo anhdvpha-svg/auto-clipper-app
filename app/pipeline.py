@@ -190,7 +190,9 @@ class Job:
                 argv += ["--language", lang]
             try:
                 _run(transcribe, argv, log)
-            except JobError as e:
+            except Cancelled:
+                raise
+            except Exception as e:  # model download blocked, decoder error...: carry on with the pictures
                 log(f"Không chép lời được ({e}); tiếp tục chỉ với hình ảnh.")
         transcript = json.load(open(tjson, encoding="utf-8")) if os.path.exists(tjson) else {"segments": []}
         transcript.setdefault("duration", duration)
@@ -213,17 +215,38 @@ class Job:
 
         # 4. choose moments
         lo, hi = LENGTHS.get(cfg.get("length"), (30, 60))
-        opts = {"num_clips": int(cfg.get("num_clips") or 0), "min_len": lo, "max_len": hi,
+        want = int(cfg.get("num_clips") or 0)
+        self.count_note = ""
+        if want:
+            # N clips must fit in the video without overlapping: shorten the clips, or lower N, and say so
+            usable = duration * 0.85  # slack: clips are cut on sentence/shot boundaries
+            if want * lo > usable:
+                new_lo = max(8, int(usable / want))
+                if want * new_lo > usable:
+                    want_fit = max(1, int(usable // 8))
+                    self.count_note = (f"Video dài {duration / 60:.1f} phút chỉ đủ cho tối đa {want_fit} clip "
+                                       f"không trùng nhau (ít nhất 8 giây mỗi clip), nên tạo {want_fit} clip.")
+                    want, new_lo = want_fit, 8
+                else:
+                    self.count_note = (f"Video dài {duration / 60:.1f} phút không đủ cho {want} clip dài {lo}–{hi} "
+                                       f"giây, nên mỗi clip được rút còn khoảng {new_lo}–{max(new_lo + 5, int(usable / want))} giây.")
+                lo, hi = new_lo, max(new_lo + 5, min(hi, int(usable / want)))
+                log(self.count_note)
+        opts = {"num_clips": want, "min_len": lo, "max_len": hi,
                 "topic": cfg.get("topic", "").strip(), "language": cfg.get("language"), "video_title": title}
         provider = cfg.get("provider", "offline")
         self.progress(0.45, "Đang chọn đoạn hay...")
+        hl = self._parse_highlights(hl_txt)
+
+        def offline_pick(o, exclude=()):
+            if mode == "talk":
+                return offline.select_talk(transcript, o, db, exclude=exclude)
+            return offline.select_visual(hl, all_shots, o, duration, exclude=exclude)
+
+        notes = ""
         if provider == "offline":
             log("Chọn đoạn ở chế độ Offline (không dùng AI).")
-            if mode == "talk":
-                clips = offline.select_talk(transcript, opts, db)
-            else:
-                clips = offline.select_visual(self._parse_highlights(hl_txt), all_shots, opts, duration)
-            notes = ""
+            clips = offline_pick(opts)
             if not clips and opts["topic"]:
                 raise JobError(f"Không tìm thấy đoạn nào khớp chủ đề \"{opts['topic']}\".")
         else:
@@ -233,11 +256,34 @@ class Job:
                    "options": opts, "transcript_txt": self._transcript_txt(work), "highlights": hl_txt}
             if mode == "visual":
                 ctx.update(self._visual_context(video, work, hl_txt, log))
-            clips, notes = llm.select_clips(provider, cfg["models"].get(provider), config.get_key(cfg, provider),
-                                            ctx, log)
-        clips = self._clean(clips, duration, lo, hi, opts["num_clips"])
+            model, key = cfg["models"].get(provider), config.get_key(cfg, provider)
+            clips, notes = llm.select_clips(provider, model, key, ctx, log)
+            clips = self._clean(clips, duration, lo, hi, want)
+            if want and len(clips) < want:
+                # the model returned fewer than asked: ask once more for the missing ones, avoiding chosen ranges
+                log(f"AI mới chọn {len(clips)}/{want} clip, đang hỏi thêm...")
+                ctx2 = dict(ctx, options=dict(opts, num_clips=want - len(clips)),
+                            exclude=[(c["start"], c["end"]) for c in clips])
+                try:
+                    more, _ = llm.select_clips(provider, model, key, ctx2, log)
+                    clips = self._clean(clips + more, duration, lo, hi, want)
+                except llm.AIError as e:
+                    log(f"Không hỏi thêm được: {e}")
+            if want and len(clips) < want and not opts["topic"]:
+                extra = offline_pick(dict(opts, num_clips=want - len(clips)),
+                                     exclude=[(c["start"], c["end"]) for c in clips])
+                for c in extra:
+                    c["reason"] = "Bổ sung tự động (offline) vì AI không chọn đủ số clip. " + c.get("reason", "")
+                clips = self._clean(clips + extra, duration, lo, hi, want)
+        clips = self._clean(clips, duration, lo, hi, want)
         if not clips:
             raise JobError("Không tìm được đoạn phù hợp. " + (notes or "Thử nới độ dài clip hoặc bỏ chủ đề."))
+        if want and len(clips) < want:
+            why = (f"chỉ có {len(clips)} đoạn khớp chủ đề \"{opts['topic']}\"" if opts["topic"]
+                   else "không còn đoạn nào đủ dài mà không trùng các clip đã chọn")
+            self.count_note = (self.count_note + " " if self.count_note else "") + \
+                f"Tạo được {len(clips)}/{want} clip: {why}."
+            log(self.count_note)
         if notes:
             log("Ghi chú của AI: " + notes)
         for i, c in enumerate(clips, 1):
@@ -301,7 +347,7 @@ class Job:
                     "length": r["length"]} for k, (c, r) in enumerate(zip(spec, rendered))]
         self.progress(1.0, "Xong!")
         log(f"Xong! {len(results)} clip trong: {out}")
-        return {"out_dir": out, "clips": results, "work_dir": work}
+        return {"out_dir": out, "clips": results, "work_dir": work, "note": self.count_note}
 
     # ------------------------------------------------------------------
     @staticmethod
@@ -334,6 +380,8 @@ class Job:
             return 9              # other language: probably a machine translation
         cands = sorted(set(cands), key=rank)
         subs = cands[0] if cands and rank(cands[0]) < 9 else None
+        if subs is None and not lang and len(cands) == 1:
+            subs = cands[0]  # language unknown and a single subtitle file next to the video: use it
         return subs, info
 
     @staticmethod
@@ -364,6 +412,7 @@ class Job:
 
     @staticmethod
     def _clean(clips, duration, lo, hi, n):
+        """Validate clips: clamp lengths (instead of dropping), resolve overlaps by trimming, keep the best n."""
         good = []
         for c in clips or []:
             try:
@@ -371,7 +420,9 @@ class Job:
             except (KeyError, TypeError, ValueError):
                 continue
             s, e = max(0.0, s), min(duration, e)
-            if e - s < max(5, lo * 0.5) or e - s > hi * 1.6:
+            if e - s > hi * 1.25:
+                e = s + hi
+            if e - s < max(5, lo * 0.5):
                 continue
             c["start"], c["end"] = s, e
             sc = c.get("score") or {}
@@ -380,7 +431,12 @@ class Job:
         good.sort(key=lambda c: -c["score"]["total"])
         chosen = []
         for c in good:
-            if all(c["end"] <= d["start"] or c["start"] >= d["end"] for d in chosen):
+            for d in chosen:  # overlapping a better clip: keep the part that doesn't overlap, if long enough
+                if c["start"] < d["end"] and c["end"] > d["start"]:
+                    left, right = (c["start"], d["start"]), (d["end"], c["end"])
+                    c["start"], c["end"] = max((left, right), key=lambda r: r[1] - r[0])
+            if c["end"] - c["start"] >= max(5, lo * 0.5) and \
+                    all(c["end"] <= d["start"] or c["start"] >= d["end"] for d in chosen):
                 chosen.append(c)
         if n:
             chosen = chosen[:n]

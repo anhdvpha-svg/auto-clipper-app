@@ -102,7 +102,16 @@ def build_user_text(ctx, transcript_part, part_info=""):
     lines.append("")
     n = o["num_clips"]
     lines.append("REQUEST:")
-    lines.append(f"- Number of clips: {n if n else 'your choice (about 1 per 5-8 minutes of video, at most 10; fewer if few moments are strong)'}")
+    if n:
+        lines.append(f"- Number of clips: exactly {n}. The user asked for this number - return {n} clips even if some "
+                     f"are weaker (score them honestly). Only return fewer if the video physically can't hold {n} "
+                     f"non-overlapping clips of this length.")
+    else:
+        lines.append("- Number of clips: your choice (about 1 per 5-8 minutes of video, at most 10; fewer if few "
+                     "moments are strong)")
+    if ctx.get("exclude"):
+        lines.append("- Already chosen (do NOT overlap these ranges, in seconds): " +
+                     ", ".join(f"{a:.1f}-{b:.1f}" for a, b in ctx["exclude"]))
     lines.append(f"- Clip length: {o['min_len']}-{o['max_len']} seconds")
     if o.get("topic"):
         lines.append(f"- Only moments matching this request: \"{o['topic']}\". If nothing matches, return fewer clips (even none) and say so in notes.")
