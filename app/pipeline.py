@@ -8,6 +8,43 @@ from .downloader import Downloader, DownloadError
 from .engine import analyze_video, fetch_video, render_clips, transcribe
 
 
+VI_CHARS = set("ăâđêôơưàảãáạằẳẵắặầẩẫấậèẻẽéẹềểễếệìỉĩíịòỏõóọồổỗốộờởỡớợùủũúụừửữứựỳỷỹýỵ")
+
+
+def guess_language(text):
+    """'vi' when the text is clearly Vietnamese (its diacritics), else 'en' if it is mostly ASCII letters."""
+    letters = [c for c in text.lower() if c.isalpha()]
+    if not letters:
+        return None
+    vi = sum(c in VI_CHARS for c in letters) / len(letters)
+    if vi > 0.03:
+        return "vi"
+    return "en" if sum(c.isascii() for c in letters) / len(letters) > 0.95 else None
+
+
+def tidy_hashtags(tags):
+    """'bi_mat_dau_tu' / '#Đầu tư' -> '#bimatdautu' / '#dautu' (no spaces, underscores or diacritics)."""
+    import unicodedata
+    out = []
+    for t in tags or []:
+        t = unicodedata.normalize("NFKD", str(t).replace("đ", "d").replace("Đ", "D"))
+        t = "".join(c for c in t if not unicodedata.combining(c)).lower()
+        t = re.sub(r"[^a-z0-9]", "", t)
+        if t and ("#" + t) not in out:
+            out.append("#" + t)
+    return out[:8]
+
+
+def strip_tags(text):
+    """Drop the hashtag tail models append to captions (often malformed, e.g. '#dau tu ban than');
+    the clean hashtag list is kept separately and added back on copy."""
+    text = (text or "").strip()
+    i = text.find("#")
+    if i > 15:
+        text = text[:i].rstrip(" ,.-|")
+    return text
+
+
 def safe_name(text, maxlen=60):
     """Readable folder name that Windows accepts (keeps Vietnamese letters)."""
     t = re.sub(r'[<>:"/\\|?*\x00-\x1f]', " ", text or "")
@@ -196,6 +233,8 @@ class Job:
                 log(f"Không chép lời được ({e}); tiếp tục chỉ với hình ảnh.")
         transcript = json.load(open(tjson, encoding="utf-8")) if os.path.exists(tjson) else {"segments": []}
         transcript.setdefault("duration", duration)
+        if not transcript.get("language") and not info.get("language"):
+            transcript["language"] = guess_language(" ".join(s["text"] for s in transcript["segments"][:200]))
         words = sum(len(s["text"].split()) for s in transcript["segments"])
         wpm = words / max(duration / 60, 0.1)
         mode = "talk" if wpm >= 40 else "visual"
@@ -257,7 +296,8 @@ class Job:
             if mode == "visual":
                 ctx.update(self._visual_context(video, work, hl_txt, log))
             model, key = cfg["models"].get(provider), config.get_key(cfg, provider)
-            clips, notes = llm.select_clips(provider, model, key, ctx, log)
+            base = (cfg.get("base_urls") or {}).get(provider)
+            clips, notes = llm.select_clips(provider, model, key, ctx, log, base=base)
             clips = self._clean(clips, duration, lo, hi, want)
             if want and len(clips) < want:
                 # the model returned fewer than asked: ask once more for the missing ones, avoiding chosen ranges
@@ -265,7 +305,7 @@ class Job:
                 ctx2 = dict(ctx, options=dict(opts, num_clips=want - len(clips)),
                             exclude=[(c["start"], c["end"]) for c in clips])
                 try:
-                    more, _ = llm.select_clips(provider, model, key, ctx2, log)
+                    more, _ = llm.select_clips(provider, model, key, ctx2, log, base=base)
                     clips = self._clean(clips + more, duration, lo, hi, want)
                 except llm.AIError as e:
                     log(f"Không hỏi thêm được: {e}")
@@ -441,14 +481,23 @@ class Job:
                 chosen.append(c)
         if n:
             chosen = chosen[:n]
-        return sorted(chosen, key=lambda c: c["start"])
+        chosen.sort(key=lambda c: c["start"])
+        for k, c in enumerate(chosen):  # too short: extend the end (or the start) into free time, up to lo
+            if c["end"] - c["start"] < lo:
+                nxt = chosen[k + 1]["start"] if k + 1 < len(chosen) else duration
+                c["end"] = min(nxt, duration, c["start"] + lo)
+                if c["end"] - c["start"] < lo:
+                    prv = chosen[k - 1]["end"] if k else 0.0
+                    c["start"] = max(prv, c["end"] - lo)
+        return chosen
 
     def _to_spec(self, c):
         spec = {"title": c.get("title") or "Clip", "start": c["start"], "end": c["end"],
                 "hook": c.get("opening_line", ""), "score": c["score"], "reason": c.get("reason", ""),
-                "captions": {"TikTok": c.get("caption_tiktok", ""), "Instagram Reels": c.get("caption_reels", ""),
-                             "YouTube Shorts": c.get("caption_shorts", "")},
-                "hashtags": c.get("hashtags") or []}
+                "captions": {"TikTok": strip_tags(c.get("caption_tiktok", "")),
+                             "Instagram Reels": strip_tags(c.get("caption_reels", "")),
+                             "YouTube Shorts": strip_tags(c.get("caption_shorts", ""))},
+                "hashtags": tidy_hashtags(c.get("hashtags"))}
         if self.cfg.get("hook", True) and c.get("hook_title"):
             spec["hook_title"] = c["hook_title"]
         return spec

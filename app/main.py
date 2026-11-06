@@ -7,7 +7,7 @@ from . import config, llm
 from .pipeline import Job, is_url
 
 APP_TITLE = "Auto Clipper"
-VERSION = "1.5"
+VERSION = "1.6"
 
 # ---- palette (dark, cyan accent - CapCut desktop feel) ----
 BG = "#0E0F12"
@@ -23,7 +23,8 @@ ACCENT_TEXT = "#03161A"
 DANGER = "#F87171"
 OK = "#4ADE80"
 
-PROVIDERS = [("offline", "Offline"), ("claude", "Claude"), ("openai", "ChatGPT"), ("gemini", "Gemini")]
+PROVIDERS = [("offline", "Offline"), ("claude", "Claude"), ("openai", "ChatGPT"), ("gemini", "Gemini"),
+             ("custom", "API tuỳ chỉnh")]
 KEY_LINKS = {"claude": "https://console.anthropic.com/settings/keys",
              "openai": "https://platform.openai.com/api-keys",
              "gemini": "https://aistudio.google.com/apikey"}
@@ -363,6 +364,8 @@ class App(ctk.CTk):
         if p == "offline":
             self.hint.configure(text="Offline: miễn phí, chọn đoạn theo âm lượng, chuyển động và câu mở đầu. "
                                      "Dùng AI để có đoạn chọn, hook và caption hay hơn.", text_color=MUTED)
+        elif p == "custom" and not (self.cfg.get("base_urls") or {}).get("custom"):
+            self.hint.configure(text="Chưa nhập địa chỉ API tuỳ chỉnh — vào Cài đặt → Tài khoản AI.", text_color=DANGER)
         elif not config.get_key(self.cfg, p):
             self.hint.configure(text=f"Chưa có API key {label_of(PROVIDERS, p)} — vào Cài đặt để thêm.",
                                 text_color=DANGER)
@@ -692,9 +695,32 @@ class App(ctk.CTk):
             row=1, column=0, columnspan=4, sticky="w", padx=20, pady=(0, 8))
         self.keys, self.models, self.key_status = {}, {}, {}
         r = 2
+        self.base_url = None
         for p, name in PROVIDERS[1:]:
-            ctk.CTkLabel(ai, text=name, font=self.font(14, "bold"), text_color=TEXT, width=90, anchor="w").grid(
-                row=r, column=0, sticky="w", padx=20, pady=6)
+            if p == "custom":  # OpenAI-compatible gateway: needs an address first
+                ctk.CTkFrame(ai, height=1, fg_color=BORDER).grid(row=r, column=0, columnspan=4, sticky="ew",
+                                                                 padx=20, pady=(8, 8))
+                r += 1
+                ctk.CTkLabel(ai, text=name, font=self.font(14, "bold"), text_color=TEXT, anchor="w").grid(
+                    row=r, column=0, sticky="w", padx=20, pady=6)
+                self.base_url = ctk.CTkEntry(ai, height=36, corner_radius=10, border_width=0, fg_color=CARD2,
+                                             font=self.font(13), text_color=TEXT,
+                                             placeholder_text="Địa chỉ API, ví dụ https://api.vilao.ai/v1")
+                self.base_url.insert(0, (self.cfg.get("base_urls") or {}).get("custom", ""))
+                self.base_url.grid(row=r, column=1, sticky="ew", pady=6)
+                self.base_url.bind("<FocusOut>", lambda _e: self._save_settings())
+                presets = ctk.CTkFrame(ai, fg_color="transparent")
+                presets.grid(row=r, column=2, columnspan=2, sticky="w", padx=8)
+                for i, (label, url) in enumerate(llm.GATEWAY_PRESETS.items()):
+                    self.button(presets, label, lambda u=url: self._set_base(u), width=90, height=32).grid(
+                        row=0, column=i, padx=(0, 6))
+                r += 1
+                self.muted(ai, "Dùng cho cổng trung gian theo chuẩn OpenAI (vilao.ai, OpenRouter...): key dạng "
+                               "'sk-...' không phải key Google/OpenAI.", 11).grid(row=r, column=1, columnspan=3,
+                                                                                 sticky="w")
+                r += 1
+            ctk.CTkLabel(ai, text="" if p == "custom" else name, font=self.font(14, "bold"), text_color=TEXT,
+                         width=90, anchor="w").grid(row=r, column=0, sticky="w", padx=20, pady=6)
             e = ctk.CTkEntry(ai, show="•", height=36, corner_radius=10, border_width=0, fg_color=CARD2,
                              font=self.font(13), text_color=TEXT, placeholder_text="API key")
             e.insert(0, config.get_key(self.cfg, p))
@@ -712,10 +738,11 @@ class App(ctk.CTk):
             self.button(ai, "Tải model", lambda p=p: self._load_models(p), width=96, height=36).grid(row=r, column=3,
                                                                                                      padx=(0, 20))
             r += 1
-            link = ctk.CTkLabel(ai, text=f"Lấy API key {name} ↗", font=self.font(12), text_color=ACCENT,
-                                cursor="hand2", anchor="w")
-            link.bind("<Button-1>", lambda _e, p=p: webbrowser.open(KEY_LINKS[p]))
-            link.grid(row=r, column=1, sticky="w")
+            if p in KEY_LINKS:
+                link = ctk.CTkLabel(ai, text=f"Lấy API key {name} ↗", font=self.font(12), text_color=ACCENT,
+                                    cursor="hand2", anchor="w")
+                link.bind("<Button-1>", lambda _e, p=p: webbrowser.open(KEY_LINKS[p]))
+                link.grid(row=r, column=1, sticky="w")
             st = self.muted(ai, "", 12)
             st.grid(row=r, column=2, columnspan=2, sticky="w", padx=8)
             self.key_status[p] = st
@@ -754,7 +781,15 @@ class App(ctk.CTk):
         self.outdir.grid(row=3, column=1, sticky="ew", pady=6)
         self.button(gen, "Đổi...", self._pick_out, width=80, height=36).grid(row=3, column=2, padx=20, pady=6)
 
+    def _set_base(self, url):
+        self.base_url.delete(0, "end")
+        self.base_url.insert(0, url)
+        self._save_settings()
+        self.key_status["custom"].configure(text="Đã điền địa chỉ. Dán key rồi bấm Tải model.", text_color=MUTED)
+
     def _save_settings(self):
+        if self.base_url is not None:
+            self.cfg.setdefault("base_urls", {})["custom"] = self.base_url.get().strip()
         for p, e in self.keys.items():
             config.set_key(self.cfg, p, e.get())
             self.cfg["models"][p] = self.models[p].get().strip()
@@ -773,7 +808,8 @@ class App(ctk.CTk):
 
         def work():
             try:
-                self.q.put(("models", (p, llm.list_models(p, key), None)))
+                base = self.base_url.get().strip() if (p == "custom" and self.base_url is not None) else None
+                self.q.put(("models", (p, llm.list_models(p, key, base), None)))
             except llm.AIError as e:
                 self.q.put(("models", (p, None, str(e))))
             except Exception as e:

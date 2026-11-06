@@ -81,8 +81,9 @@ def unprotect(stored: str) -> str:
 
 DEFAULTS = {
     "provider": "offline",            # offline | claude | openai | gemini
-    "models": {"claude": "claude-opus-5-5", "openai": "", "gemini": ""},
-    "keys": {"claude": "", "openai": "", "gemini": ""},   # stored protected
+    "models": {"claude": "claude-opus-5-5", "openai": "", "gemini": "", "custom": ""},
+    "keys": {"claude": "", "openai": "", "gemini": "", "custom": ""},   # stored protected
+    "base_urls": {"custom": ""},      # OpenAI-compatible gateway, e.g. https://api.vilao.ai/v1
     "num_clips": 0,                   # 0 = automatic
     "length": "30-60",
     "topic": "",

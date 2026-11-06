@@ -3,14 +3,18 @@ import base64, io, json
 
 import httpx
 
-PROVIDERS = {"claude": "Claude (Anthropic)", "openai": "ChatGPT (OpenAI)", "gemini": "Gemini (Google)"}
+PROVIDERS = {"claude": "Claude (Anthropic)", "openai": "ChatGPT (OpenAI)", "gemini": "Gemini (Google)",
+             "custom": "API tuỳ chỉnh"}
+# OpenAI-compatible gateways (resellers / routers). Their keys are not Google/OpenAI keys.
+GATEWAY_PRESETS = {"vilao.ai": "https://api.vilao.ai/v1", "OpenRouter": "https://openrouter.ai/api/v1"}
 DEFAULT_MODELS = {
     "claude": ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"],
     "openai": [],   # filled from the account's model list ("Tải danh sách model")
     "gemini": [],
+    "custom": [],
 }
 # characters of transcript per request (well under each family's context window)
-CHUNK_CHARS = {"claude": 600_000, "gemini": 600_000, "openai": 250_000}
+CHUNK_CHARS = {"claude": 600_000, "gemini": 600_000, "openai": 250_000, "custom": 250_000}
 
 SYSTEM = """You are a senior short-form video editor (TikTok, Instagram Reels, YouTube Shorts), working like OpusClip.
 From a long video you pick the moments most likely to perform as standalone vertical clips, score them, and write
@@ -247,34 +251,58 @@ def _http_error(name, r):
     return AIError(f"Lỗi từ {name} ({r.status_code}): {msg}")
 
 
-def _openai_call(key, model, user_text, images):
+OPENAI_BASE = "https://api.openai.com/v1"
+
+
+def _chat_call(key, model, user_text, images, base=OPENAI_BASE, name="ChatGPT"):
+    """OpenAI chat-completions format: OpenAI itself and any compatible gateway (vilao.ai, OpenRouter...)."""
+    url = base.rstrip("/") + "/chat/completions"
     content = [{"type": "text", "text": user_text + "\n\n" + JSON_SHAPE}]
     content += [{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b}"}} for b in images]
     body = {"model": model, "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": content}],
             "response_format": {"type": "json_object"}}
+    headers = {"Authorization": f"Bearer {key}"}
     try:
-        r = httpx.post("https://api.openai.com/v1/chat/completions", json=body, timeout=900,
-                       headers={"Authorization": f"Bearer {key}"})
+        r = httpx.post(url, json=body, timeout=900, headers=headers)
+        if r.status_code == 400 and (images or "response_format" in r.text):
+            # some gateways/models reject images or JSON mode: retry plain text, JSON asked for in the prompt
+            body2 = {"model": model, "messages": [{"role": "system", "content": SYSTEM},
+                                                  {"role": "user", "content": user_text + "\n\n" + JSON_SHAPE}]}
+            r = httpx.post(url, json=body2, timeout=900, headers=headers)
     except httpx.HTTPError:
-        raise AIError("Không kết nối được tới OpenAI. Kiểm tra mạng.")
+        raise AIError(f"Không kết nối được tới {name} ({base}). Kiểm tra mạng hoặc địa chỉ API.")
     if r.status_code != 200:
-        raise _http_error("ChatGPT", r)
-    msg = r.json()["choices"][0]["message"]
+        raise _http_error(name, r)
+    try:
+        msg = r.json()["choices"][0]["message"]
+    except (ValueError, KeyError, IndexError):
+        raise AIError(f"{name} trả về dữ liệu không đúng chuẩn OpenAI. Kiểm tra lại địa chỉ API (thường kết thúc bằng /v1).")
     if msg.get("refusal"):
-        raise AIError("ChatGPT từ chối xử lý nội dung này.")
+        raise AIError(f"{name} từ chối xử lý nội dung này.")
     return _parse_json(msg.get("content"))
 
 
-def _openai_models(key):
+def _openai_call(key, model, user_text, images):
+    return _chat_call(key, model, user_text, images)
+
+
+def _list_chat_models(key, base, name):
     try:
-        r = httpx.get("https://api.openai.com/v1/models", headers={"Authorization": f"Bearer {key}"}, timeout=30)
+        r = httpx.get(base.rstrip("/") + "/models", headers={"Authorization": f"Bearer {key}"}, timeout=30)
     except httpx.HTTPError:
-        raise AIError("Không kết nối được tới OpenAI. Kiểm tra mạng.")
+        raise AIError(f"Không kết nối được tới {name} ({base}). Kiểm tra mạng hoặc địa chỉ API.")
     if r.status_code != 200:
-        raise _http_error("ChatGPT", r)
+        raise _http_error(name, r)
+    try:
+        return r.json().get("data", [])
+    except ValueError:
+        raise AIError(f"{name} không trả về danh sách model. Địa chỉ API thường có dạng https://.../v1")
+
+
+def _openai_models(key):
+    ids = [m["id"] for m in _list_chat_models(key, OPENAI_BASE, "ChatGPT")]
     skip = ("audio", "realtime", "tts", "transcribe", "image", "search", "embedding", "instruct", "moderation",
             "whisper", "dall-e", "davinci", "babbage", "codex")
-    ids = [m["id"] for m in r.json().get("data", [])]
     ok = [i for i in ids if (i.startswith(("gpt-", "chatgpt-")) or (i[:1] == "o" and i[1:2].isdigit()))
           and not any(s in i for s in skip)]
     return sorted(ok, reverse=True)
@@ -285,7 +313,15 @@ def _openai_models(key):
 GEMINI = "https://generativelanguage.googleapis.com/v1beta"
 
 
+def _check_google_key(key):
+    if key and not key.startswith("AIza"):
+        raise AIError("Key này không phải key Google Gemini (key của Google bắt đầu bằng 'AIza'). Nếu key lấy từ "
+                      "cổng trung gian như vilao.ai, hãy chọn 'API tuỳ chỉnh' và nhập địa chỉ API của cổng đó "
+                      "(Cài đặt → Tài khoản AI → API tuỳ chỉnh → bấm vilao.ai).")
+
+
 def _gemini_call(key, model, user_text, images):
+    _check_google_key(key)
     parts = [{"text": user_text + "\n\n" + JSON_SHAPE}]
     parts += [{"inlineData": {"mimeType": "image/jpeg", "data": b}} for b in images]
     body = {"systemInstruction": {"parts": [{"text": SYSTEM}]},
@@ -309,6 +345,7 @@ def _gemini_call(key, model, user_text, images):
 
 
 def _gemini_models(key):
+    _check_google_key(key)
     try:
         r = httpx.get(f"{GEMINI}/models", params={"pageSize": 1000}, headers={"x-goog-api-key": key}, timeout=30)
     except httpx.HTTPError:
@@ -326,17 +363,32 @@ def _gemini_models(key):
 
 # ---------------- public API ----------------
 
-_CALL = {"claude": _claude_call, "openai": _openai_call, "gemini": _gemini_call}
-_LIST = {"claude": _claude_models, "openai": _openai_models, "gemini": _gemini_models}
+def _custom_call(key, model, user_text, images, base=None):
+    if not base:
+        raise AIError("Chưa nhập địa chỉ API cho 'API tuỳ chỉnh' (ví dụ https://api.vilao.ai/v1).")
+    return _chat_call(key, model, user_text, images, base=base, name="API tuỳ chỉnh")
 
 
-def list_models(provider, key):
+def _custom_models(key, base=None):
+    if not base:
+        raise AIError("Nhập địa chỉ API trước (ví dụ https://api.vilao.ai/v1).")
+    data = _list_chat_models(key, base, "API tuỳ chỉnh")
+    ids = [m.get("id") for m in data if m.get("id") and m.get("active", True)]
+    chat = [i for i in ids if not any(x in i for x in ("embedding", "tts", "whisper", "dall-e", "image", "audio"))]
+    return chat or ids
+
+
+_CALL = {"claude": _claude_call, "openai": _openai_call, "gemini": _gemini_call, "custom": _custom_call}
+_LIST = {"claude": _claude_models, "openai": _openai_models, "gemini": _gemini_models, "custom": _custom_models}
+
+
+def list_models(provider, key, base=None):
     if not key:
         raise AIError("Nhập API key trước.")
-    return _LIST[provider](key)
+    return _LIST[provider](key, base) if provider == "custom" else _LIST[provider](key)
 
 
-def select_clips(provider, model, key, ctx, log=print):
+def select_clips(provider, model, key, ctx, log=print, base=None):
     """Ask the model for clips. Long transcripts are split into parts and the best clips across parts kept."""
     if not key:
         raise AIError("Chưa nhập API key cho " + PROVIDERS[provider])
@@ -361,7 +413,8 @@ def select_clips(provider, model, key, ctx, log=print):
         info = f"This is part {i + 1} of {len(parts)} of the transcript; propose the best clips from this part." \
             if len(parts) > 1 else ""
         log(f"Đang hỏi {PROVIDERS[provider]} ({model})" + (f" - phần {i + 1}/{len(parts)}" if len(parts) > 1 else "") + "...")
-        data = _CALL[provider](key, model, build_user_text(ctx, part, info), images if i == 0 else [])
+        args = (key, model, build_user_text(ctx, part, info), images if i == 0 else [])
+        data = _CALL[provider](*args, base=base) if provider == "custom" else _CALL[provider](*args)
         all_clips += data.get("clips") or []
         if data.get("notes"):
             notes.append(str(data["notes"]))
