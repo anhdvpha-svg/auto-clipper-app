@@ -312,7 +312,8 @@ class Job:
         clips_path = os.path.join(work, "clips.json")
         json.dump({"clips": spec}, open(clips_path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
         argv = ["--video", video, "--clips", clips_path, "--out-dir", out,
-                "--highlight", cfg.get("highlight", "FFE600"), "--encoder", cfg.get("encoder", "auto")]
+                "--highlight", cfg.get("highlight", "FFE600"), "--encoder", cfg.get("encoder", "auto"),
+                "--zoom-fx", cfg.get("zoom_fx", "medium")]
         if transcript["segments"]:
             argv += ["--transcript", tjson]
         if shots_path:

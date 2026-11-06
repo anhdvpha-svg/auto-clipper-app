@@ -7,7 +7,7 @@ from . import config, llm
 from .pipeline import Job, is_url
 
 APP_TITLE = "Auto Clipper"
-VERSION = "1.4"
+VERSION = "1.5"
 
 # ---- palette (dark, cyan accent - CapCut desktop feel) ----
 BG = "#0E0F12"
@@ -30,6 +30,7 @@ KEY_LINKS = {"claude": "https://console.anthropic.com/settings/keys",
 NUMS = [("0", "Tự động"), ("3", "3"), ("5", "5"), ("8", "8"), ("10", "10")]
 MAX_CLIPS = 30
 LENGTHS = [("15-30", "15–30s"), ("30-60", "30–60s"), ("60-90", "60–90s")]
+ZOOMFX = [("off", "Tắt"), ("light", "Nhẹ"), ("medium", "Vừa"), ("strong", "Mạnh")]
 FRAMINGS = [("auto", "Tự động"), ("center", "Cắt giữa"), ("blur", "Nền mờ")]
 LANGS = [("auto", "Theo video"), ("vi", "Tiếng Việt"), ("en", "English")]
 ENCODERS = [("auto", "Nhanh nhất (GPU nếu có)"), ("x264", "Chỉ dùng CPU")]
@@ -276,8 +277,14 @@ class App(ctk.CTk):
         self.cap = self._switch(style, "Phụ đề", self.cfg.get("captions", True), 6)
         self.upper = self._switch(style, "IN HOA", self.cfg.get("uppercase", True), 7)
         self.hook = self._switch(style, "Tiêu đề hook", self.cfg.get("hook", True), 8)
+        fxbox = ctk.CTkFrame(opt, fg_color="transparent")
+        self.zoomfx = self.seg(fxbox, ZOOMFX, self.cfg.get("zoom_fx", "medium"))
+        self.zoomfx.grid(row=0, column=0, sticky="w")
+        self.muted(fxbox, "Tự nghe nhạc: zoom giật vào điểm nhấn (tiếng nổ, trống), nhấp theo beat, "
+                          "đẩy zoom chậm ở cảnh dài.", 12).grid(row=0, column=1, sticky="w", padx=(12, 0))
+        row(4, 0, "Zoom theo nhịp nhạc", fxbox, span=2)
         self.hint = self.muted(opt, "", 12)
-        self.hint.grid(row=8, column=0, columnspan=2, sticky="w", padx=18, pady=(2, 14))
+        self.hint.grid(row=12, column=0, columnspan=2, sticky="w", padx=18, pady=(2, 14))
         self._provider_hint()
 
         # progress card (hidden until a job runs)
@@ -797,6 +804,7 @@ class App(ctk.CTk):
         c["num_clips"] = self._num_value()
         c["length"] = key_of(LENGTHS, self.length.get())
         c["framing"] = key_of(FRAMINGS, self.framing.get())
+        c["zoom_fx"] = key_of(ZOOMFX, self.zoomfx.get())
         c["topic"] = self.topic.get().strip()
         c["highlight"] = self.color
         c["captions"], c["uppercase"], c["hook"] = bool(self.cap.get()), bool(self.upper.get()), bool(self.hook.get())

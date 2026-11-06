@@ -77,6 +77,7 @@ def rerender(out_dir, index, clip, log=print):
 
 POSITIONS = [("top", "Trên"), ("middle", "Giữa"), ("bottom", "Dưới")]
 THEMES = [("light", "Nền trắng"), ("dark", "Nền đen"), ("accent", "Màu nhấn")]
+ZOOMFX = [("off", "Tắt"), ("light", "Nhẹ"), ("medium", "Vừa"), ("strong", "Mạnh")]
 COLORS = ["FFE600", "22D3EE", "FF4FA3", "5BFF6B", "FFFFFF"]
 
 
@@ -144,7 +145,7 @@ class ClipEditor(ctk.CTkToplevel):
         self._hook_tab(tabs.add("Tiêu đề hook"))
         self._caption_tab(tabs.add("Phụ đề"))
         self._time_tab(tabs.add("Thời lượng"))
-        self._audio_tab(tabs.add("Âm thanh"))
+        self._audio_tab(tabs.add("Âm thanh & zoom"))
         self._post_tab(tabs.add("Caption đăng bài"))
 
     def _row(self, master, r, label, widget, hint=None):
@@ -154,7 +155,7 @@ class ClipEditor(ctk.CTkToplevel):
         widget.grid(row=r, column=1, sticky="ew", padx=(0, 16), pady=8)
         if hint:
             ctk.CTkLabel(master, text=hint, font=f(11), text_color=self.T["MUTED"], anchor="w", justify="left",
-                         wraplength=520).grid(
+                         wraplength=440).grid(
                 row=r + 1, column=1, sticky="w", padx=(0, 16))
 
     def _slider(self, master, frm, to, value, steps, fmt):
@@ -322,9 +323,16 @@ class ClipEditor(ctk.CTkToplevel):
                                          lambda v: f"{v:+.1f} dB")
         self._row(t, 1, "Tăng / giảm", box, "Kéo sang phải nếu clip còn nhỏ tiếng, sang trái nếu bị rè/vỡ tiếng. "
                                             "Tắt cân bằng để giữ nguyên âm lượng gốc.")
+        cur_fx = self.clip.get("zoom_fx") or self.app.cfg.get("zoom_fx", "medium")
+        self.fx = self.app.seg(t, ZOOMFX, cur_fx)
+        info = (self.rendered.get("zoom_fx") or {})
+        hint = (f"Lần dựng trước: nhịp {info.get('bpm', 0):.0f} BPM"
+                f"{' (có nhạc)' if info.get('music') else ''}, {info.get('punches', 0)} lần zoom giật."
+                if info.get("level", "off") != "off" else "Zoom giật vào điểm nhấn, nhấp theo beat, đẩy zoom chậm ở cảnh dài.")
+        self._row(t, 4, "Zoom theo nhạc", self.fx, hint)
         ctk.CTkLabel(t, text="Đầu clip bị hụt tiếng hoặc có tiếng thừa? Vào tab Thời lượng, chỉnh Bắt đầu sớm hoặc "
                              "muộn hơn 0,5–1 giây.", font=f(12), text_color=T["MUTED"], wraplength=560, justify="left",
-                     anchor="w").grid(row=3, column=0, columnspan=2, sticky="w", padx=16, pady=(14, 0))
+                     anchor="w").grid(row=6, column=0, columnspan=2, sticky="w", padx=16, pady=(14, 0))
 
     # ---------- post caption ----------
     def _post_tab(self, t):
@@ -373,6 +381,7 @@ class ClipEditor(ctk.CTkToplevel):
             else:
                 c.pop("captions_override", None)
         c["audio"] = {"normalize": bool(self.au_norm.get()), "gain_db": round(self.au_gain.get(), 1)}
+        c["zoom_fx"] = dict((v, k) for k, v in ZOOMFX)[self.fx.get()]
         c["captions"] = {k: tb.get("1.0", "end").strip() for k, tb in self.post.items()}
         c["hashtags"] = [h if h.startswith("#") else "#" + h for h in self.tags.get().split()]
         return c

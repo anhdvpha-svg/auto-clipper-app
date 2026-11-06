@@ -94,6 +94,7 @@ DEFAULTS = {
     "hook": True,
     "whisper_model": "small",
     "output_dir": "",
+    "zoom_fx": "medium",              # off | light | medium | strong - music-synced zoom effects
     "encoder": "auto",                # auto (GPU if available) | x264 (CPU)
     "browser": "",                    # "" | firefox | chrome | edge | brave - YouTube login fallback
 }

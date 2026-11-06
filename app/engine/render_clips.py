@@ -24,6 +24,11 @@ clips.json format: see references/clips_schema.md.
 """
 import argparse, json, os, re, shutil, subprocess, sys, unicodedata
 
+try:  # imported as part of the desktop app (package) or run as a script next to beats.py
+    from . import beats
+except ImportError:
+    import beats
+
 PUNCT_END = re.compile(r"[.!?…:;]$")
 
 
@@ -420,6 +425,25 @@ def render_clip(idx, clip, a, src, words, duration, shots, act):
     else:
         last = "[v0]"
 
+    # music-synced zoom (punch-ins on hits, beat pulses, slow push-ins) on the composed frame, before any text
+    fx_level = clip.get("zoom_fx", a.zoom_fx)
+    fx = {"level": fx_level, "events": 0}
+    if fx_level != "off" and src["has_audio"]:
+        info = beats.analyse(os.path.abspath(a.video), ranges)
+        cuts, off = [], 0.0
+        for k, (s, e) in enumerate(ranges):
+            cuts += [p[0] - s + off for p in segs if s < p[0] < e and p[0] >= s]  # shot cuts in clip time
+            off += e - s
+            if k:
+                cuts.append(off - (e - s))  # range joins are cuts too
+        events = beats.plan_zoom(info, sorted(cuts), total, fx_level)
+        zf = beats.zoom_filter(events, W, H, a.fps)
+        if zf:
+            parts.append(f"{last}{zf}[vz]")
+            last = "[vz]"
+        fx = {"level": fx_level, "bpm": info["bpm"], "music": info["music"], "events": len(events),
+              "punches": sum(e["type"] == "punch" for e in events)}
+
     slug = f"clip_{idx:02d}_{slugify(clip.get('title', ''))}"
     cs = clip.get("caption_style") or {}
     chunks = clip.get("captions_override")
@@ -481,7 +505,9 @@ def render_clip(idx, clip, a, src, words, duration, shots, act):
 
     out_name = f"{slug}.mp4"
     lays = "".join("F" if l == "fill" else "B" for _, _, l, _ in segs)
-    print(f"[{slug}] {total:.1f}s ranges={ranges} shots={lays} (F=fill, B=fit/blur)", file=sys.stderr)
+    fxs = (f" fx={fx['level']}: {fx.get('bpm', 0):.0f} BPM{' music' if fx.get('music') else ''}, "
+           f"{fx.get('punches', 0)} punch / {fx['events']} zoom events") if fx["level"] != "off" else ""
+    print(f"[{slug}] {total:.1f}s ranges={ranges} shots={lays} (F=fill, B=fit/blur){fxs}", file=sys.stderr)
     enc = pick_encoder(a.encoder)
 
     def run(enc_name):
@@ -499,7 +525,7 @@ def render_clip(idx, clip, a, src, words, duration, shots, act):
     subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", f"{min(1.0, total / 2):.2f}", "-i", out_name,
                     "-frames:v", "1", "-vf", "scale=360:-2", f"{slug}.jpg"], cwd=a.out_dir)
     return {"file": out_name, "thumb": f"{slug}.jpg", "ranges": ranges, "length": round(total, 1),
-            "words": len(clip_words), "shot_layouts": lays}
+            "words": len(clip_words), "shot_layouts": lays, "zoom_fx": fx}
 
 
 def fmt(t):
@@ -558,6 +584,8 @@ def main(argv=None):
     ap.add_argument("--only", help="comma-separated 1-based clip numbers to (re)render")
     ap.add_argument("--encoder", default="auto", choices=["auto", "x264", "nvenc", "qsv", "amf"],
                     help="H.264 encoder: auto = GPU (NVIDIA/Intel/AMD) when available, else CPU x264")
+    ap.add_argument("--zoom-fx", default="medium", choices=["off", "light", "medium", "strong"],
+                    help="music-synced zoom: punch-ins on hits, beat pulses, slow push-ins (default medium)")
     ap.add_argument("--jobs", type=int, default=0, help="clips rendered in parallel (default: 2 if >= 6 CPU cores)")
     a = ap.parse_args(argv)
     a.W, a.H = (int(x) for x in a.size.lower().split("x"))
