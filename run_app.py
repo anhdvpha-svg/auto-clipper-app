@@ -93,7 +93,7 @@ def selftest(out_dir):
             pk = subprocess.run([tools._paths()["ffprobe"] if os.path.exists(tools._paths()["ffprobe"]) else "ffprobe",
                                  "-v", "error", "-select_streams", "a", "-show_entries", "packet=pts_time",
                                  "-of", "csv=p=0", c["file"]], capture_output=True, text=True).stdout.split()
-            ts = [float(x) for x in pk if x.strip()]
+            ts = [float(x.strip(",")) for x in pk if x.strip(",").strip()]  # first AAC packet is ~-0.021 s (priming)
             gaps = [b - a for a, b in zip(ts, ts[1:]) if b - a > 0.1 or b - a < 0.001]
             assert ts and ts[0] < 0.05 and not gaps, f"audio timestamps broken: start={ts[:1]} bad={len(gaps)}"
             log(f"clip ok: {os.path.basename(c['file'])} {c['length']}s, audio continuous ({len(ts)} packets)")
