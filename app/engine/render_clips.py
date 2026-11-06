@@ -292,7 +292,9 @@ def range_chain(k, s, e, pieces, seek, actcrop, act, W, H, fps):
                 xexpr = f"if(between(t,{a0:.3f},{b0:.3f}),{x_of(cx)},{xexpr})"
             xexpr = f"'{xexpr}'"
         fill = f"crop={cw}:{ah}:{xexpr}:0,scale={W}:{H},setsar=1"
-    fit_bg = (f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},gblur=sigma=40,eq=brightness=-0.08")
+    bw, bh = W // 4 // 2 * 2, H // 4 // 2 * 2
+    fit_bg = (f"scale={bw}:{bh}:force_original_aspect_ratio=increase,crop={bw}:{bh},boxblur=8:2,"
+              f"scale={W}:{H}:flags=bilinear,eq=brightness=-0.08")
     if not fits:
         return f"{head},{fill}[v{k}]"
     fit = (f"split[fa{k}][fb{k}];[fa{k}]{fit_bg}[bg{k}];[fb{k}]scale={W}:-2[fg{k}];"
@@ -327,9 +329,10 @@ def clip_words_of(ranges, words):
 
 
 def measure_loudness(video, ranges):
-    """Pass 1 of two-pass loudnorm. One-pass (dynamic) loudnorm needs ~3 s of look-ahead and ramps the
-    level at the start of every clip - the first seconds sound quiet or pumping. Measuring first lets
-    pass 2 apply one steady gain (linear mode)."""
+    """Integrated loudness (LUFS) and true peak (dBTP) of the clip's span, measured only.
+    The loudnorm *filter* is not used on the output: it resamples to 192 kHz internally and at the start of a
+    clip it can emit audio frames with duplicated/jumping timestamps - players then drop the first seconds
+    of sound. A plain measured gain (volume) never touches timestamps."""
     s, e = min(r[0] for r in ranges), max(r[1] for r in ranges)
     r = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-ss", f"{s:.3f}", "-t", f"{e - s:.3f}", "-i", video,
                         "-vn", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json", "-f", "null", "-"],
@@ -339,12 +342,64 @@ def measure_loudness(video, ranges):
         return None
     try:
         j = json.loads(m[-1])
-        vals = {k: float(j[k]) for k in ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset")}
+        i, tp = float(j["input_i"]), float(j["input_tp"])
     except (KeyError, ValueError):
         return None
-    if vals["input_i"] < -70:  # silence: nothing to normalise
+    if i < -70:  # silence: nothing to normalise
         return None
-    return vals
+    return {"i": i, "tp": tp}
+
+
+def audio_filter(m, audio_opts, total, fade):
+    """Gain to -14 LUFS (+ user gain), a true-peak limiter only when needed, then clean timestamps."""
+    opts = audio_opts or {}
+    gain = 0.0
+    if m and opts.get("normalize", True):
+        gain = max(-20.0, min(20.0, -14.0 - m["i"]))
+    gain += float(opts.get("gain_db", 0.0))
+    f = []
+    if abs(gain) > 0.05:
+        f.append(f"volume={gain:.2f}dB")
+    peak = (m["tp"] if m else -1.0) + gain
+    if peak > -1.0:
+        f.append("alimiter=limit=0.84:attack=5:release=50:level=disabled")  # 0.84 ~ -1.5 dBFS
+    f += ["aresample=48000", "asetpts=N/SR/TB", "afade=t=in:d=0.02"]
+    if fade and total > 2:
+        f.append(f"afade=t=out:st={total - 0.3:.3f}:d=0.3")
+    return ",".join(f)
+
+
+# ---------- encoding ----------
+
+ENCODERS = {
+    # name: (ffmpeg args, pixel format)
+    "nvenc": (["-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq", "-rc", "vbr", "-cq", "21", "-b:v", "0",
+               "-maxrate", "25M", "-bufsize", "50M", "-profile:v", "high"], "yuv420p"),
+    "qsv": (["-c:v", "h264_qsv", "-preset", "medium", "-global_quality", "21", "-profile:v", "high"], "nv12"),
+    "amf": (["-c:v", "h264_amf", "-quality", "balanced", "-rc", "cqp", "-qp_i", "20", "-qp_p", "22",
+             "-profile:v", "high"], "nv12"),
+    "x264": (["-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-profile:v", "high"], "yuv420p"),
+}
+_ENC_CACHE = {}
+
+
+def pick_encoder(choice="auto"):
+    """'auto' -> first hardware H.264 encoder that actually works on this PC (NVIDIA, Intel, AMD), else x264."""
+    if choice != "auto":
+        return choice if choice in ENCODERS else "x264"
+    if "auto" in _ENC_CACHE:
+        return _ENC_CACHE["auto"]
+    found = "x264"
+    for name in ("nvenc", "qsv", "amf"):
+        args, pix = ENCODERS[name]
+        r = subprocess.run(["ffmpeg", "-hide_banner", "-v", "error", "-f", "lavfi", "-i",
+                            "color=black:s=1080x1920:r=30:d=0.3", "-pix_fmt", pix, *args, "-f", "null", "-"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if r.returncode == 0:
+            found = name
+            break
+    _ENC_CACHE["auto"] = found
+    return found
 
 
 def render_clip(idx, clip, a, src, words, duration, shots, act):
@@ -417,26 +472,30 @@ def render_clip(idx, clip, a, src, words, duration, shots, act):
         for k, (s, e) in enumerate(ranges):
             parts.append(f"[0:a]atrim=start={s - seek:.3f}:end={e - seek:.3f},asetpts=PTS-STARTPTS[ar{k}]")
         chain = "".join(f"[ar{k}]" for k in range(len(ranges))) + f"concat=n={len(ranges)}:v=0:a=1"
-        if not a.no_loudnorm:
+        aopts = clip.get("audio") or {}
+        m = None
+        if not a.no_loudnorm and aopts.get("normalize", True):
             m = measure_loudness(os.path.abspath(a.video), ranges)
-            if m:
-                chain += (f",loudnorm=I=-14:TP=-1.5:LRA=11:measured_I={m['input_i']}:measured_TP={m['input_tp']}:"
-                          f"measured_LRA={m['input_lra']}:measured_thresh={m['input_thresh']}:"
-                          f"offset={m['target_offset']}:linear=true")
-        chain += ",aresample=48000,afade=t=in:d=0.03"
-        if not a.no_fade and total > 2:
-            chain += f",afade=t=out:st={total - 0.3:.3f}:d=0.3"
-        parts.append(chain + "[aout]")
+        parts.append(f"{chain},{audio_filter(m, aopts, total, not a.no_fade)}[aout]")
         amap = ["-map", "[aout]", "-c:a", "aac", "-b:a", "192k", "-ar", "48000"]
 
     out_name = f"{slug}.mp4"
-    cmd = ["ffmpeg", "-y", "-v", "error", "-ss", f"{seek:.3f}", "-i", os.path.abspath(a.video), *extra_inputs,
-           "-filter_complex", ";".join(parts), "-map", last, *amap,
-           "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
-           "-movflags", "+faststart", "-t", f"{total:.3f}", out_name]
     lays = "".join("F" if l == "fill" else "B" for _, _, l, _ in segs)
     print(f"[{slug}] {total:.1f}s ranges={ranges} shots={lays} (F=fill, B=fit/blur)", file=sys.stderr)
-    subprocess.run(cmd, check=True, cwd=a.out_dir)
+    enc = pick_encoder(a.encoder)
+
+    def run(enc_name):
+        venc, pix = ENCODERS[enc_name]
+        cmd = ["ffmpeg", "-y", "-v", "error", "-ss", f"{seek:.3f}", "-i", os.path.abspath(a.video), *extra_inputs,
+               "-filter_complex", ";".join(parts), "-map", last, *amap, *venc, "-pix_fmt", pix,
+               "-g", str(int(a.fps * 2)), "-movflags", "+faststart", "-t", f"{total:.3f}", out_name]
+        return subprocess.run(cmd, cwd=a.out_dir, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    r = run(enc)
+    if r.returncode != 0 and enc != "x264":  # GPU encoder refused this job: fall back to CPU
+        print(f"   {enc} failed, using CPU encoder", file=sys.stderr)
+        r = run("x264")
+    if r.returncode != 0:
+        raise RuntimeError("ffmpeg failed: " + "\n".join(r.stderr.strip().splitlines()[-4:]))
     subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", f"{min(1.0, total / 2):.2f}", "-i", out_name,
                     "-frames:v", "1", "-vf", "scale=360:-2", f"{slug}.jpg"], cwd=a.out_dir)
     return {"file": out_name, "thumb": f"{slug}.jpg", "ranges": ranges, "length": round(total, 1),
@@ -497,6 +556,9 @@ def main(argv=None):
     ap.add_argument("--size", default="1080x1920")
     ap.add_argument("--max-fps", type=float, default=60)
     ap.add_argument("--only", help="comma-separated 1-based clip numbers to (re)render")
+    ap.add_argument("--encoder", default="auto", choices=["auto", "x264", "nvenc", "qsv", "amf"],
+                    help="H.264 encoder: auto = GPU (NVIDIA/Intel/AMD) when available, else CPU x264")
+    ap.add_argument("--jobs", type=int, default=0, help="clips rendered in parallel (default: 2 if >= 6 CPU cores)")
     a = ap.parse_args(argv)
     a.W, a.H = (int(x) for x in a.size.lower().split("x"))
     a.highlight = a.highlight.lstrip("#")
@@ -531,12 +593,21 @@ def main(argv=None):
     prev_path = os.path.join(a.out_dir, "clips_rendered.json")
     if only and os.path.exists(prev_path):
         prev = {i: r for i, r in enumerate(json.load(open(prev_path, encoding="utf-8"))["rendered"], 1)}
-    results = []
-    for i, c in enumerate(clips, 1):
-        if only and i not in only and i in prev:
-            results.append(prev[i])
-            continue
-        results.append(render_clip(i, c, a, src, words, duration, shots, act))
+    enc = pick_encoder(a.encoder)
+    print(f"Encoder: {enc}", file=sys.stderr)
+    jobs = a.jobs or (2 if (os.cpu_count() or 2) >= 6 else 1)
+    todo = [(i, c) for i, c in enumerate(clips, 1) if not (only and i not in only and i in prev)]
+    done = {}
+    if jobs > 1 and len(todo) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=jobs) as ex:
+            futs = {i: ex.submit(render_clip, i, c, a, src, words, duration, shots, act) for i, c in todo}
+            for i, f in futs.items():
+                done[i] = f.result()
+    else:
+        for i, c in todo:
+            done[i] = render_clip(i, c, a, src, words, duration, shots, act)
+    results = [done.get(i) or prev[i] for i in range(1, len(clips) + 1)]
     write_report(os.path.join(a.out_dir, "report.md"), clips, results, a.video)
     json.dump({"clips": clips, "rendered": results}, open(prev_path, "w", encoding="utf-8"),
               ensure_ascii=False, indent=1)

@@ -15,6 +15,17 @@ def load_project(out_dir):
     if not os.path.exists(pj):
         raise ProjectError("Dự án này được tạo bằng bản cũ nên không chỉnh sửa được. Hãy tạo lại clip.")
     proj = json.load(open(pj, encoding="utf-8"))
+    old = proj.get("out_dir")
+    if old and os.path.normcase(os.path.abspath(old)) != os.path.normcase(os.path.abspath(out_dir)):
+        # the project folder was renamed or moved: re-point every stored path
+        def fix(v):
+            if isinstance(v, str) and v.startswith(old):
+                return out_dir + v[len(old):]
+            return [fix(x) for x in v] if isinstance(v, list) else v
+        proj = {k: fix(v) for k, v in proj.items()}
+    if not os.path.exists(proj.get("video", "")):
+        raise ProjectError("Không còn video gốc của dự án này (đã dọn file tạm hoặc file bị xoá/di chuyển), "
+                           "nên không dựng lại được. Hãy tạo lại clip.")
     data = json.load(open(os.path.join(out_dir, "clips_rendered.json"), encoding="utf-8"))
     return proj, data
 
@@ -133,6 +144,7 @@ class ClipEditor(ctk.CTkToplevel):
         self._hook_tab(tabs.add("Tiêu đề hook"))
         self._caption_tab(tabs.add("Phụ đề"))
         self._time_tab(tabs.add("Thời lượng"))
+        self._audio_tab(tabs.add("Âm thanh"))
         self._post_tab(tabs.add("Caption đăng bài"))
 
     def _row(self, master, r, label, widget, hint=None):
@@ -141,7 +153,8 @@ class ClipEditor(ctk.CTkToplevel):
             row=r, column=0, sticky="nw", padx=(16, 12), pady=8)
         widget.grid(row=r, column=1, sticky="ew", padx=(0, 16), pady=8)
         if hint:
-            ctk.CTkLabel(master, text=hint, font=f(11), text_color=self.T["MUTED"], anchor="w", justify="left").grid(
+            ctk.CTkLabel(master, text=hint, font=f(11), text_color=self.T["MUTED"], anchor="w", justify="left",
+                         wraplength=520).grid(
                 row=r + 1, column=1, sticky="w", padx=(0, 16))
 
     def _slider(self, master, frm, to, value, steps, fmt):
@@ -296,6 +309,23 @@ class ClipEditor(ctk.CTkToplevel):
         except (ValueError, AttributeError):
             pass
 
+    # ---------- audio ----------
+    def _audio_tab(self, t):
+        T, f = self.T, self.app.font
+        t.grid_columnconfigure(1, weight=1)
+        au = self.clip.get("audio") or {}
+        self.au_norm = ctk.CTkSwitch(t, text="Tự cân bằng âm lượng (chuẩn -14 LUFS của TikTok/Reels/Shorts)",
+                                     font=f(13), text_color=T["TEXT"], progress_color=T["ACCENT"])
+        (self.au_norm.select if au.get("normalize", True) else self.au_norm.deselect)()
+        self.au_norm.grid(row=0, column=0, columnspan=2, sticky="w", padx=16, pady=(16, 8))
+        box, self.au_gain = self._slider(t, -12, 12, float(au.get("gain_db", 0.0)), 48,
+                                         lambda v: f"{v:+.1f} dB")
+        self._row(t, 1, "Tăng / giảm", box, "Kéo sang phải nếu clip còn nhỏ tiếng, sang trái nếu bị rè/vỡ tiếng. "
+                                            "Tắt cân bằng để giữ nguyên âm lượng gốc.")
+        ctk.CTkLabel(t, text="Đầu clip bị hụt tiếng hoặc có tiếng thừa? Vào tab Thời lượng, chỉnh Bắt đầu sớm hoặc "
+                             "muộn hơn 0,5–1 giây.", font=f(12), text_color=T["MUTED"], wraplength=560, justify="left",
+                     anchor="w").grid(row=3, column=0, columnspan=2, sticky="w", padx=16, pady=(14, 0))
+
     # ---------- post caption ----------
     def _post_tab(self, t):
         T, f = self.T, self.app.font
@@ -342,6 +372,7 @@ class ClipEditor(ctk.CTkToplevel):
                 c["captions_override"] = edited
             else:
                 c.pop("captions_override", None)
+        c["audio"] = {"normalize": bool(self.au_norm.get()), "gain_db": round(self.au_gain.get(), 1)}
         c["captions"] = {k: tb.get("1.0", "end").strip() for k, tb in self.post.items()}
         c["hashtags"] = [h if h.startswith("#") else "#" + h for h in self.tags.get().split()]
         return c

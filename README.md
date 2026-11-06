@@ -22,7 +22,11 @@ Lần chạy đầu, app tự tải các công cụ cần thiết (yt-dlp, ffmpe
      - Lấy API key ChatGPT: https://platform.openai.com/api-keys
      - Lấy API key Gemini: https://aistudio.google.com/apikey
 3. **Clip**: số clip, độ dài, và ô *Chỉ lấy* để chọn theo chủ đề (ví dụ "những đoạn hài hước", "đoạn nói về marketing").
-4. Bấm **Tạo clip**. Clip, ảnh bìa và `report.md` (điểm viral, caption, hashtag) được lưu vào `Videos\AutoClipper\<tên video>-<thời gian>`.
+4. Bấm **Tạo clip**. Clip, ảnh bìa và `report.md` (điểm viral, caption, hashtag) được lưu vào
+   `Videos\AutoClipper\<ngày>\<giờ> - <tên video>\`.
+5. Mỗi clip có nút **Xem clip**, **✎ Sửa** (tiêu đề hook, phụ đề, thời lượng, âm thanh, caption), **Copy** caption và
+   **Vị trí** (mở thư mục, chọn sẵn file).
+6. Trang **Dự án**: xem theo ngày, tìm theo tên, xem dung lượng, đổi tên, dọn file tạm (video gốc đã tải) hoặc xoá dự án.
 
 API key được mã hoá bằng Windows DPAPI (gắn với tài khoản Windows của bạn) và chỉ gửi tới nhà cung cấp AI bạn chọn.
 

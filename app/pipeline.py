@@ -8,6 +8,31 @@ from .downloader import Downloader, DownloadError
 from .engine import analyze_video, fetch_video, render_clips, transcribe
 
 
+def safe_name(text, maxlen=60):
+    """Readable folder name that Windows accepts (keeps Vietnamese letters)."""
+    t = re.sub(r'[<>:"/\\|?*\x00-\x1f]', " ", text or "")
+    t = re.sub(r"\s+", " ", t).strip(" .")
+    return t[:maxlen].rstrip(" .") or "video"
+
+
+def project_folder(day_dir, now, title):
+    base = os.path.join(day_dir, f"{now.strftime('%Hh%M')} - {safe_name(title)}")
+    path, n = base, 2
+    while os.path.exists(path):
+        path, n = f"{base} ({n})", n + 1
+    return path
+
+
+def hide(path):
+    """Mark the work folder hidden on Windows (source video, transcript, plans) - it stays for re-editing."""
+    if os.name == "nt":
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetFileAttributesW(str(path), 0x02)
+        except Exception:
+            pass
+
+
 class JobError(Exception):
     """Shown to the user as-is."""
 
@@ -73,6 +98,17 @@ class Job:
     def _thread(self):
         try:
             self.done(self.run(), None)
+            return
+        except BaseException as e:
+            tmp = getattr(self, "_tmp", None)
+            if tmp and os.path.isdir(tmp):
+                shutil.rmtree(tmp, ignore_errors=True)
+            out = getattr(self, "_out", None)  # half-made project with no clips: don't leave clutter
+            if out and os.path.isdir(out) and not os.path.exists(os.path.join(out, "clips_rendered.json")):
+                shutil.rmtree(out, ignore_errors=True)
+            err = e
+        try:
+            raise err
         except Cancelled:
             self.done(None, "Đã huỷ.")
         except (JobError, llm.AIError) as e:
@@ -89,11 +125,13 @@ class Job:
         self.tools = tools.ensure(log)
         self._check()
 
-        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        now = datetime.datetime.now()
         root = cfg.get("output_dir") or config.default_output_dir()
-        os.makedirs(root, exist_ok=True)
-        work = os.path.join(root, f"_work-{stamp}")
+        day_dir = os.path.join(root, now.strftime("%Y-%m-%d"))       # one folder per day
+        os.makedirs(day_dir, exist_ok=True)
+        work = os.path.join(day_dir, f".tmp-{now.strftime('%H%M%S')}")  # renamed into the project below
         os.makedirs(work, exist_ok=True)
+        self._tmp = work
 
         # 1. source video + subtitles + info
         info = {}
@@ -117,8 +155,19 @@ class Job:
         self._check()
 
         title = info.get("title") or os.path.splitext(os.path.basename(video))[0]
-        out = os.path.join(root, f"{render_clips.slugify(title, 50)}-{stamp}")
+        # project folder: <Lưu vào>/<YYYY-MM-DD>/<HHhMM - title>/ with clips, report and a hidden _work folder
+        out = project_folder(day_dir, now, title)
         os.makedirs(out, exist_ok=True)
+        self._out = out
+        new_work = os.path.join(out, "_work")
+        os.replace(work, new_work)
+        if os.path.dirname(os.path.abspath(video)) == os.path.abspath(work):
+            video = os.path.join(new_work, os.path.basename(video))
+        if subs and os.path.dirname(os.path.abspath(subs)) == os.path.abspath(work):
+            subs = os.path.join(new_work, os.path.basename(subs))
+        work = new_work
+        self._tmp = None
+        hide(work)
         probe = render_clips.ffprobe_json(video)
         duration = float(probe["format"].get("duration") or 0)
         has_audio = any(s["codec_type"] == "audio" for s in probe["streams"])
@@ -217,7 +266,7 @@ class Job:
         clips_path = os.path.join(work, "clips.json")
         json.dump({"clips": spec}, open(clips_path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
         argv = ["--video", video, "--clips", clips_path, "--out-dir", out,
-                "--highlight", cfg.get("highlight", "FFE600")]
+                "--highlight", cfg.get("highlight", "FFE600"), "--encoder", cfg.get("encoder", "auto")]
         if transcript["segments"]:
             argv += ["--transcript", tjson]
         if shots_path:
@@ -231,7 +280,8 @@ class Job:
         if not cfg.get("hook", True):
             argv.append("--no-hook")
         # remember how this project was rendered, so the editor can re-render single clips later
-        json.dump({"video": os.path.abspath(video), "work": work, "base_args": [x for i, x in enumerate(argv) if x != "--clips" and not (i and argv[i - 1] == "--clips")],
+        json.dump({"out_dir": out, "title": title, "source": self.source, "created": now.isoformat(timespec="seconds"),
+                   "video": os.path.abspath(video), "work": work, "base_args": [x for i, x in enumerate(argv) if x != "--clips" and not (i and argv[i - 1] == "--clips")],
                    "transcript": tjson if transcript["segments"] else None},
                   open(os.path.join(out, "project.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
         n_clips, seen = len(spec), [0]

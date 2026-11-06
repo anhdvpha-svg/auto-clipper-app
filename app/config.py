@@ -94,6 +94,7 @@ DEFAULTS = {
     "hook": True,
     "whisper_model": "small",
     "output_dir": "",
+    "encoder": "auto",                # auto (GPU if available) | x264 (CPU)
     "browser": "",                    # "" | firefox | chrome | edge | brave - YouTube login fallback
 }
 

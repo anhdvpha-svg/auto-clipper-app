@@ -7,7 +7,7 @@ from . import config, llm
 from .pipeline import Job, is_url
 
 APP_TITLE = "Auto Clipper"
-VERSION = "1.2"
+VERSION = "1.3"
 
 # ---- palette (dark, cyan accent - CapCut desktop feel) ----
 BG = "#0E0F12"
@@ -31,6 +31,7 @@ NUMS = [("0", "Tự động"), ("1", "1"), ("3", "3"), ("5", "5"), ("8", "8"), (
 LENGTHS = [("15-30", "15–30s"), ("30-60", "30–60s"), ("60-90", "60–90s")]
 FRAMINGS = [("auto", "Tự động"), ("center", "Cắt giữa"), ("blur", "Nền mờ")]
 LANGS = [("auto", "Theo video"), ("vi", "Tiếng Việt"), ("en", "English")]
+ENCODERS = [("auto", "Nhanh nhất (GPU nếu có)"), ("x264", "Chỉ dùng CPU")]
 BROWSERS = [("", "Không dùng"), ("firefox", "Firefox"), ("chrome", "Chrome"), ("edge", "Edge"), ("brave", "Brave")]
 COLORS = ["FFE600", "22D3EE", "FF4FA3", "5BFF6B", "FFFFFF"]
 STEPS = ["Tải video", "Chép lời", "Phân tích hình ảnh", "Chọn đoạn hay", "Lên khung từng cảnh", "Dựng clip"]
@@ -44,6 +45,38 @@ def open_path(p):
         subprocess.Popen(["open", p])
     else:
         subprocess.Popen(["xdg-open", p])
+
+
+def reveal(path):
+    """Open the file manager with this file selected."""
+    path = os.path.normpath(path)
+    if os.name == "nt":
+        subprocess.Popen(f'explorer /select,"{path}"')
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", "-R", path])
+    else:
+        subprocess.Popen(["xdg-open", os.path.dirname(path)])
+
+
+def dir_size(path):
+    total = 0
+    for dp, _, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(dp, f))
+            except OSError:
+                pass
+    return total
+
+
+def human(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit in ("B", "KB") else f"{n:.1f} {unit}"
+        n /= 1024
+
+
+WEEKDAYS = ["Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm", "Thứ Sáu", "Thứ Bảy", "Chủ Nhật"]
 
 
 def label_of(pairs, key):
@@ -371,17 +404,20 @@ class App(ctk.CTk):
             if c.get("hook_title"):
                 self.muted(card, f"Hook: {c['hook_title']}", 11, wraplength=190).grid(row=2, column=0, sticky="ew",
                                                                                      padx=14, pady=(2, 0))
+            ctk.CTkButton(card, text="▶  Xem clip", height=32, corner_radius=8, fg_color=ACCENT,
+                          hover_color=ACCENT_HOVER, text_color=ACCENT_TEXT, font=self.font(12, "bold"),
+                          command=lambda p=c["file"]: open_path(p)).grid(row=3, column=0, sticky="ew", padx=10,
+                                                                         pady=(8, 4))
             btns = ctk.CTkFrame(card, fg_color="transparent")
-            btns.grid(row=3, column=0, sticky="ew", padx=10, pady=(8, 12))
-            btns.grid_columnconfigure((0, 1, 2), weight=1)
-            ctk.CTkButton(btns, text="▶ Xem", height=30, corner_radius=8, fg_color=ACCENT, hover_color=ACCENT_HOVER,
-                          text_color=ACCENT_TEXT, font=self.font(12, "bold"),
-                          command=lambda p=c["file"]: open_path(p)).grid(row=0, column=0, sticky="ew", padx=(0, 3))
-            self.button(btns, "✎ Sửa", lambda i=c.get("index", i): self._edit(res["out_dir"], i), height=30, width=60
-                        ).grid(row=0, column=1, sticky="ew", padx=3)
+            btns.grid(row=4, column=0, sticky="ew", padx=10, pady=(0, 12))
+            btns.grid_columnconfigure((0, 1, 2), weight=1, uniform="b")
+            self.button(btns, "✎ Sửa", lambda i=c.get("index", i): self._edit(res["out_dir"], i), height=30, width=50
+                        ).grid(row=0, column=0, sticky="ew", padx=(0, 3))
             cap = (c.get("captions") or {}).get("TikTok") or c["title"]
             tags = " ".join(c.get("hashtags") or [])
-            self.button(btns, "Copy", lambda t=f"{cap}\n{tags}".strip(): self._copy(t), height=30, width=60
+            self.button(btns, "Copy", lambda t=f"{cap}\n{tags}".strip(): self._copy(t), height=30, width=50
+                        ).grid(row=0, column=1, sticky="ew", padx=3)
+            self.button(btns, "Vị trí", lambda p=c["file"]: reveal(p), height=30, width=50
                         ).grid(row=0, column=2, sticky="ew", padx=(3, 0))
         self.res.grid(row=5, column=0, sticky="ew")
 
@@ -416,52 +452,184 @@ class App(ctk.CTk):
         page = ctk.CTkScrollableFrame(self, fg_color=BG, corner_radius=0)
         page.grid_columnconfigure(0, weight=1)
         self.pages["projects"] = page
-        ctk.CTkLabel(page, text="Dự án", font=self.font(28, "bold"), text_color=TEXT, anchor="w").grid(
-            row=0, column=0, sticky="w", padx=36, pady=(30, 4))
-        self.muted(page, "Các lần tạo clip trước đây, mới nhất ở trên.", 14).grid(row=1, column=0, sticky="w", padx=36)
+        head = ctk.CTkFrame(page, fg_color="transparent")
+        head.grid(row=0, column=0, sticky="ew", padx=36, pady=(30, 4))
+        head.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(head, text="Dự án", font=self.font(28, "bold"), text_color=TEXT, anchor="w").grid(
+            row=0, column=0, sticky="w")
+        self.button(head, "Mở thư mục lưu", lambda: open_path(self._out_root()), height=36, width=140).grid(row=0, column=1)
+        self.proj_info = self.muted(page, "", 14)
+        self.proj_info.grid(row=1, column=0, sticky="w", padx=36)
+        self.proj_search = ctk.CTkEntry(page, height=40, corner_radius=10, border_width=0, fg_color=CARD2,
+                                        font=self.font(14), text_color=TEXT, placeholder_text="Tìm theo tên video...",
+                                        placeholder_text_color=MUTED)
+        self.proj_search.grid(row=2, column=0, sticky="ew", padx=36, pady=(14, 4))
+        self.proj_search.bind("<KeyRelease>", lambda _: self._render_projects())
         self.proj_list = ctk.CTkFrame(page, fg_color="transparent")
-        self.proj_list.grid(row=2, column=0, sticky="ew", padx=30, pady=16)
+        self.proj_list.grid(row=3, column=0, sticky="ew", padx=30, pady=(8, 24))
         self.proj_list.grid_columnconfigure(0, weight=1)
+        self._projects = []
+        self._confirm = None
+
+    def _out_root(self):
+        r = self.cfg.get("output_dir") or config.default_output_dir()
+        os.makedirs(r, exist_ok=True)
+        return r
 
     def _refresh_projects(self):
-        for w in self.proj_list.winfo_children():
-            w.destroy()
-        root = self.cfg.get("output_dir") or config.default_output_dir()
-        items = sorted(glob.glob(os.path.join(root, "*", "clips_rendered.json")), key=os.path.getmtime, reverse=True)
-        if not items:
-            self.muted(self.proj_list, "Chưa có dự án nào. Tạo clip đầu tiên ở mục Tạo clip.", 14).grid(
-                row=0, column=0, sticky="w", padx=6, pady=20)
-            return
-        self._proj_thumbs = []
-        for i, p in enumerate(items[:50]):
+        """Scan <Lưu vào>/<YYYY-MM-DD>/<project>/ (and older flat folders)."""
+        root = self._out_root()
+        found = glob.glob(os.path.join(root, "*", "*", "clips_rendered.json")) + \
+            glob.glob(os.path.join(root, "*", "clips_rendered.json"))
+        items = []
+        for p in found:
             d = os.path.dirname(p)
             try:
                 data = json.load(open(p, encoding="utf-8"))
+                proj = json.load(open(os.path.join(d, "project.json"), encoding="utf-8")) \
+                    if os.path.exists(os.path.join(d, "project.json")) else {}
             except Exception:
                 continue
-            row = self.card(self.proj_list)
-            row.grid(row=i, column=0, sticky="ew", pady=5)
-            row.grid_columnconfigure(1, weight=1)
-            thumb = os.path.join(d, data["rendered"][0]["thumb"]) if data.get("rendered") else ""
+            mtime = os.path.getmtime(p)
+            created = proj.get("created")
             try:
-                from PIL import Image, ImageOps
-                im = ImageOps.fit(Image.open(thumb).convert("RGB"), (54, 96))
-                img = ctk.CTkImage(im, im, size=(54, 96))
-                self._proj_thumbs.append(img)
-                ctk.CTkLabel(row, image=img, text="").grid(row=0, column=0, rowspan=2, padx=14, pady=12)
-            except Exception:
+                when = time.mktime(time.strptime(created, "%Y-%m-%dT%H:%M:%S")) if created else mtime
+            except ValueError:
+                when = mtime
+            work = os.path.join(d, "_work")
+            big = [os.path.join(work, f) for f in os.listdir(work)] if os.path.isdir(work) else []
+            big = [f for f in big if f.lower().endswith((".mp4", ".webm", ".mkv", ".m4a", ".part"))]
+            items.append({"dir": d, "data": data, "proj": proj, "when": when, "size": dir_size(d),
+                          "temp": sum(os.path.getsize(f) for f in big), "temp_files": big,
+                          "name": proj.get("title") or os.path.basename(d)})
+        items.sort(key=lambda x: -x["when"])
+        self._projects = items
+        total = sum(x["size"] for x in items)
+        self.proj_info.configure(text=f"{len(items)} dự án · {human(total)} trên ổ đĩa · lưu tại {root}")
+        self._confirm = None
+        self._render_projects()
+
+    def _render_projects(self):
+        for w in self.proj_list.winfo_children():
+            w.destroy()
+        q = self.proj_search.get().strip().lower()
+        items = [x for x in self._projects if q in x["name"].lower()] if q else self._projects
+        if not items:
+            self.muted(self.proj_list, "Chưa có dự án nào." if not q else "Không có dự án khớp tìm kiếm.", 14).grid(
+                row=0, column=0, sticky="w", padx=6, pady=20)
+            return
+        self._proj_thumbs = []
+        row_i, last_day = 0, None
+        for it in items[:200]:
+            day = time.strftime("%Y-%m-%d", time.localtime(it["when"]))
+            if day != last_day:
+                last_day = day
+                lt = time.localtime(it["when"])
+                same = [x for x in items if time.strftime("%Y-%m-%d", time.localtime(x["when"])) == day]
+                hdr = ctk.CTkFrame(self.proj_list, fg_color="transparent")
+                hdr.grid(row=row_i, column=0, sticky="ew", padx=6, pady=(16 if row_i else 4, 4))
+                hdr.grid_columnconfigure(0, weight=1)
+                today = time.strftime("%Y-%m-%d")
+                title = "Hôm nay" if day == today else f"{WEEKDAYS[lt.tm_wday]}, {time.strftime('%d/%m/%Y', lt)}"
+                self.h(hdr, f"{title}  ·  {len(same)} dự án  ·  {human(sum(x['size'] for x in same))}", 15).grid(
+                    row=0, column=0, sticky="w")
+                day_dir = os.path.dirname(it["dir"])
+                self.button(hdr, "Mở thư mục ngày", lambda dd=day_dir: open_path(dd), height=30, width=130).grid(
+                    row=0, column=1)
+                row_i += 1
+            self._project_row(it, row_i)
+            row_i += 1
+
+    def _project_row(self, it, r):
+        d, data = it["dir"], it["data"]
+        row = self.card(self.proj_list)
+        row.grid(row=r, column=0, sticky="ew", pady=4)
+        row.grid_columnconfigure(1, weight=1)
+        thumb = os.path.join(d, data["rendered"][0]["thumb"]) if data.get("rendered") else ""
+        try:
+            from PIL import Image, ImageOps
+            im = ImageOps.fit(Image.open(thumb).convert("RGB"), (54, 96))
+            img = ctk.CTkImage(im, im, size=(54, 96))
+            self._proj_thumbs.append(img)
+            ctk.CTkLabel(row, image=img, text="").grid(row=0, column=0, rowspan=3, padx=14, pady=12)
+        except Exception:
+            pass
+        name = ctk.CTkLabel(row, text=it["name"], font=self.font(15, "bold"), text_color=TEXT, anchor="w",
+                            wraplength=520, justify="left")
+        name.grid(row=0, column=1, sticky="sw", pady=(14, 0))
+        when = time.strftime("%H:%M", time.localtime(it["when"]))
+        extra = f" · file tạm {human(it['temp'])}" if it["temp"] else ""
+        self.muted(row, f"{when} · {len(data.get('rendered', []))} clip · {human(it['size'])}{extra}", 12).grid(
+            row=1, column=1, sticky="nw")
+        status = self.muted(row, "", 12)
+        status.grid(row=2, column=1, sticky="nw", pady=(0, 10))
+        res = {"out_dir": d, "clips": [{**c, "index": k, "file": os.path.join(d, r2["file"]),
+                                        "thumb": os.path.join(d, r2["thumb"]), "length": r2["length"]}
+                                       for k, (c, r2) in enumerate(zip(data["clips"], data["rendered"]))]}
+        btns = ctk.CTkFrame(row, fg_color="transparent")
+        btns.grid(row=0, column=2, rowspan=3, padx=(6, 14))
+        self.button(btns, "Xem clip", lambda r_=res: (self._show_results(r_), self.show("create")), width=90,
+                    height=32).grid(row=0, column=0, padx=3)
+        self.button(btns, "Mở thư mục", lambda: open_path(d), width=100, height=32).grid(row=0, column=1, padx=3)
+        self.button(btns, "Đổi tên", lambda: self._rename_project(it, name, status), width=80, height=32).grid(
+            row=0, column=2, padx=3)
+        if it["temp"]:
+            self.button(btns, "Dọn file tạm", lambda: self._clean_project(it, status), width=110, height=32).grid(
+                row=0, column=3, padx=3)
+        delb = ctk.CTkButton(btns, text="Xoá", width=70, height=32, corner_radius=10, fg_color=CARD2,
+                             hover_color="#5B1F1F", text_color=DANGER, font=self.font(13), border_width=1,
+                             border_color=BORDER)
+        delb.configure(command=lambda: self._delete_project(it, delb, status))
+        delb.grid(row=0, column=4, padx=3)
+
+    def _delete_project(self, it, btn, status):
+        import shutil
+        if self._confirm is not it:  # first click arms, second click deletes
+            self._confirm = it
+            btn.configure(text="Chắc chắn?", fg_color="#5B1F1F", text_color=TEXT, width=100)
+            status.configure(text="Bấm 'Chắc chắn?' để xoá vĩnh viễn thư mục dự án này.", text_color=DANGER)
+            return
+        try:
+            shutil.rmtree(it["dir"])
+        except OSError as e:
+            status.configure(text=f"Không xoá được: {e}", text_color=DANGER)
+            return
+        self._refresh_projects()
+
+    def _clean_project(self, it, status):
+        freed = 0
+        for f in it["temp_files"]:
+            try:
+                freed += os.path.getsize(f)
+                os.remove(f)
+            except OSError:
                 pass
-            name = os.path.basename(d).rsplit("-", 2)[0].replace("-", " ")
-            self.h(row, name, 15).grid(row=0, column=1, sticky="sw", pady=(16, 0))
-            when = time.strftime("%d/%m/%Y %H:%M", time.localtime(os.path.getmtime(p)))
-            self.muted(row, f"{len(data.get('rendered', []))} clip · {when}", 12).grid(row=1, column=1, sticky="nw")
-            res = {"out_dir": d, "clips": [{**c, "index": k, "file": os.path.join(d, r["file"]),
-                                            "thumb": os.path.join(d, r["thumb"]), "length": r["length"]}
-                                           for k, (c, r) in enumerate(zip(data["clips"], data["rendered"]))]}
-            self.button(row, "Xem clip", lambda r=res: (self._show_results(r), self.show("create")),
-                        width=100, height=34).grid(row=0, column=2, rowspan=2, padx=6)
-            self.button(row, "Mở thư mục", lambda dd=d: open_path(dd), width=110, height=34).grid(row=0, column=3, rowspan=2,
-                                                                                         padx=(0, 14))
+        status.configure(text=f"Đã giải phóng {human(freed)}. Clip đã xuất giữ nguyên; dự án này không chỉnh sửa "
+                              f"được nữa.", text_color=OK)
+        self.after(1500, self._refresh_projects)
+
+    def _rename_project(self, it, label, status):
+        from .pipeline import safe_name
+        dlg = ctk.CTkInputDialog(text="Tên mới cho dự án:", title="Đổi tên dự án")
+        new = (dlg.get_input() or "").strip()
+        if not new:
+            return
+        prefix = os.path.basename(it["dir"]).split(" - ", 1)[0] if " - " in os.path.basename(it["dir"]) else ""
+        target = os.path.join(os.path.dirname(it["dir"]), (f"{prefix} - " if prefix else "") + safe_name(new))
+        if os.path.exists(target):
+            status.configure(text="Đã có dự án trùng tên trong ngày này.", text_color=DANGER)
+            return
+        try:
+            os.rename(it["dir"], target)
+            pj = os.path.join(target, "project.json")
+            if os.path.exists(pj):
+                proj = json.load(open(pj, encoding="utf-8"))
+                proj["title"] = new
+                json.dump(proj, open(pj, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+        except OSError as e:
+            status.configure(text=f"Không đổi tên được (đang mở file trong thư mục?): {e}", text_color=DANGER)
+            return
+        self._refresh_projects()
 
     # ---------------- settings page ----------------
     def _build_settings(self):
@@ -531,18 +699,22 @@ class App(ctk.CTk):
         self.whisper = self.seg(gen, [("small", "Nhanh"), ("medium", "Cân bằng"), ("large-v3", "Chính xác nhất")],
                                 self.cfg.get("whisper_model", "small"), lambda _: self._save_settings())
         self.whisper.grid(row=2, column=1, sticky="w", pady=6)
-        self.muted(gen, "Lưu clip vào", 13).grid(row=3, column=0, sticky="w", padx=20, pady=(6, 18))
+        self.muted(gen, "Xuất video", 13).grid(row=4, column=0, sticky="w", padx=20, pady=(6, 18))
+        self.encoder = self.seg(gen, ENCODERS, self.cfg.get("encoder", "auto"), lambda _: self._save_settings())
+        self.encoder.grid(row=4, column=1, sticky="w", pady=(6, 18))
+        self.muted(gen, "Lưu clip vào", 13).grid(row=3, column=0, sticky="w", padx=20, pady=6)
         self.outdir = ctk.CTkEntry(gen, height=36, corner_radius=10, border_width=0, fg_color=CARD2, font=self.font(13),
                                    text_color=TEXT)
         self.outdir.insert(0, self.cfg["output_dir"])
-        self.outdir.grid(row=3, column=1, sticky="ew", pady=(6, 18))
-        self.button(gen, "Đổi...", self._pick_out, width=80, height=36).grid(row=3, column=2, padx=20, pady=(6, 18))
+        self.outdir.grid(row=3, column=1, sticky="ew", pady=6)
+        self.button(gen, "Đổi...", self._pick_out, width=80, height=36).grid(row=3, column=2, padx=20, pady=6)
 
     def _save_settings(self):
         for p, e in self.keys.items():
             config.set_key(self.cfg, p, e.get())
             self.cfg["models"][p] = self.models[p].get().strip()
         self.cfg["browser"] = key_of(BROWSERS, self.browser.get())
+        self.cfg["encoder"] = key_of(ENCODERS, self.encoder.get())
         self.cfg["language"] = key_of(LANGS, self.lang.get())
         self.cfg["whisper_model"] = key_of([("small", "Nhanh"), ("medium", "Cân bằng"),
                                             ("large-v3", "Chính xác nhất")], self.whisper.get())
