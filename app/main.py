@@ -4,10 +4,11 @@ import glob, json, os, queue, subprocess, sys, threading, time, webbrowser
 import customtkinter as ctk
 
 from . import config, llm
+from .research_ui import ResearchMixin
 from .pipeline import Job, is_url
 
 APP_TITLE = "Auto Clipper"
-VERSION = "1.6"
+VERSION = "1.7"
 
 # ---- palette (dark, cyan accent - CapCut desktop feel) ----
 BG = "#0E0F12"
@@ -90,7 +91,7 @@ def key_of(pairs, label):
     return next((k for k, v in pairs if v == label), pairs[0][0])
 
 
-class App(ctk.CTk):
+class App(ResearchMixin, ctk.CTk):
     def __init__(self):
         super().__init__()
         ctk.set_appearance_mode("dark")
@@ -108,6 +109,7 @@ class App(ctk.CTk):
             pass
         self.theme = {"BG": BG, "CARD": CARD, "CARD2": CARD2, "BORDER": BORDER, "TEXT": TEXT, "MUTED": MUTED,
                       "ACCENT": ACCENT, "ACCENT_HOVER": ACCENT_HOVER}
+        self.clip_queue = []
         self.open_path = open_path
         self.q = queue.Queue()
         self.job = None
@@ -119,6 +121,7 @@ class App(ctk.CTk):
         self.pages = {}
         self._build_create()
         self._build_projects()
+        self._build_research()
         self._build_settings()
         self.show("create")
         self.after(100, self._poll)
@@ -181,7 +184,8 @@ class App(ctk.CTk):
             pass
         ctk.CTkLabel(logo, text="Auto Clipper", font=self.font(18, "bold"), text_color=TEXT).grid(row=0, column=1)
         self.nav = {}
-        for i, (key, text) in enumerate((("create", "✂   Tạo clip"), ("projects", "▦   Dự án"),
+        for i, (key, text) in enumerate((("create", "✂   Tạo clip"), ("research", "◎   Khám phá nguồn"),
+                                         ("projects", "▦   Dự án"),
                                          ("settings", "⚙   Cài đặt")), start=1):
             b = ctk.CTkButton(sb, text=text, anchor="w", height=42, corner_radius=10, font=self.font(14),
                               fg_color="transparent", hover_color=CARD2, text_color=MUTED,
@@ -310,6 +314,8 @@ class App(ctk.CTk):
             l = ctk.CTkLabel(steps, text=f"○  {s}", font=self.font(13), text_color=MUTED)
             l.grid(row=0, column=i, padx=6, pady=2, sticky="w")
             self.step_lbl.append(l)
+        self.queue_lbl = ctk.CTkLabel(self.prog, text="", font=self.font(12), text_color=MUTED, anchor="w")
+        self.queue_lbl.grid(row=5, column=0, sticky="w", padx=20)
         det = ctk.CTkFrame(self.prog, fg_color="transparent")
         det.grid(row=3, column=0, sticky="ew", padx=20, pady=(6, 14))
         self.det_btn = ctk.CTkButton(det, text="Chi tiết ▾", width=90, height=26, fg_color="transparent",
@@ -880,10 +886,38 @@ class App(ctk.CTk):
                        done=lambda r, e: self.q.put(("done", (r, e))))
         self.job.start()
 
+    def enqueue(self, urls, front=False):
+        """Add source links to the clip queue (from Khám phá nguồn); runs them one after another."""
+        urls = [u for u in urls if u not in self.clip_queue]
+        self.clip_queue = urls + self.clip_queue if front else self.clip_queue + urls
+        self._upd_queue()
+        self.show("create")
+        if not self.job:
+            self._start_next()
+
+    def _upd_queue(self):
+        n = len(self.clip_queue)
+        self.queue_lbl.configure(text=f"Hàng chờ: còn {n} video sẽ được cắt tiếp theo." if n else "")
+
+    def _start_next(self):
+        if self.job or not self.clip_queue:
+            return
+        url = self.clip_queue.pop(0)
+        self._upd_queue()
+        self.src.delete(0, "end")
+        self.src.insert(0, url)
+        self._start()
+        if not self.job:  # couldn't start (missing key, bad settings): stop the queue, keep the rest
+            self.clip_queue.insert(0, url)
+            self._upd_queue()
+
     def _flash(self, text):
         self.hint.configure(text=text, text_color=DANGER)
 
     def _cancel(self):
+        if self.clip_queue:
+            self.clip_queue.clear()
+            self._upd_queue()
         if self.job:
             self.job.cancel()
             self.status.configure(text="Đang huỷ...")
@@ -914,6 +948,8 @@ class App(ctk.CTk):
                         self._save_settings()
                     else:
                         self.key_status[p].configure(text="Tài khoản chưa có model phù hợp.", text_color=DANGER)
+                elif kind.startswith("rs_"):
+                    self._rs_handle(kind, data)
                 elif kind == "done":
                     res, err = data
                     self.job = None
@@ -935,6 +971,8 @@ class App(ctk.CTk):
                             self._toggle_log()
                         self._show_results(res)
                         self.after(150, lambda: self.pages["create"]._parent_canvas.yview_moveto(1.0))
+                    if self.clip_queue and not (err and err == "Đã huỷ."):
+                        self.after(1500, self._start_next)  # next video in the queue, success or not
         except queue.Empty:
             pass
         self.after(100, self._poll)

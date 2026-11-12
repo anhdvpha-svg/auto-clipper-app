@@ -30,6 +30,16 @@ Lần chạy đầu, app tự tải các công cụ cần thiết (yt-dlp, ffmpe
 
 API key được mã hoá bằng Windows DPAPI (gắn với tài khoản Windows của bạn) và chỉ gửi tới nhà cung cấp AI bạn chọn.
 
+## Khám phá nguồn (tìm video để clip)
+
+- **Tìm theo từ khoá** (YouTube): lọc theo thời gian đăng, độ dài, sắp xếp theo lượt xem/mới nhất.
+- **Kênh theo dõi**: dán link kênh YouTube, Twitch, Kick hoặc TikTok của các creator trong campaign; app gom video mới
+  nhất của tất cả các kênh.
+- Mỗi video có **điểm Hot** (tốc độ tăng view mỗi giờ, độ mới, độ dài phù hợp để cắt, tương tác) và nhãn *Đang lên*,
+  *Mới*, *Dài*, *Đã cắt*.
+- Tick nhiều video → **Thêm vào hàng chờ**: app tự tải và cắt lần lượt với cài đặt ở trang Tạo clip.
+- TikTok chặn xem danh sách khi chưa đăng nhập: chọn trình duyệt đang đăng nhập trong Cài đặt → Tải video.
+
 ## Tính năng
 
 - Tự tải video và phụ đề từ link. Có phụ đề YouTube thì dùng luôn, không có thì tự chép lời bằng Whisper (chạy offline, hỗ trợ tiếng Việt).
