@@ -77,9 +77,16 @@ class ResearchMixin:
             self.rs_chip[k] = b
         self.rs_plat_hint = self.muted(kw, "", 11, wraplength=880)
         self.rs_plat_hint.grid(row=3, column=0, columnspan=2, sticky="w", padx=14)
+        lg = ctk.CTkFrame(kw, fg_color="transparent")
+        lg.grid(row=5, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 12))
+        self.muted(lg, "Nền tảng cần đăng nhập (đăng nhập 1 lần, app nhớ phiên):", 11).grid(row=0, column=0,
+                                                                                          sticky="w", padx=2)
+        self.login_buttons(lg, ["tiktok", "instagram", "x", "facebook", "twitch"], compact=True).grid(
+            row=1, column=0, sticky="w")
+        self._login_refreshers = getattr(self, "_login_refreshers", []) + [lambda: self._rs_toggle_plat(None)]
         self._rs_toggle_plat(None)
         filt = ctk.CTkFrame(kw, fg_color="transparent")
-        filt.grid(row=4, column=0, columnspan=2, sticky="ew", padx=12, pady=(6, 12))
+        filt.grid(row=4, column=0, columnspan=2, sticky="ew", padx=12, pady=(6, 4))
         self.rs_period = self._rs_filter(filt, 0, "Đăng trong", PERIODS, rcfg.get("period", "week"))
         self.rs_len = self._rs_filter(filt, 1, "Độ dài", LENGTHS, rcfg.get("length", "any"))
         self.rs_count = self._rs_filter(filt, 2, "Kết quả mỗi nền tảng", COUNTS, str(rcfg.get("count", 20)))
@@ -181,12 +188,24 @@ class ResearchMixin:
                 self.rs_plats.discard(key)
             else:
                 self.rs_plats.add(key)
+        from . import platform_login
+        locked = []
         for k, b in self.rs_chip.items():
             on = k in self.rs_plats
-            b.configure(fg_color=T["ACCENT"] if on else T["CARD2"], hover_color=T["ACCENT_HOVER"] if on else T["BORDER"],
-                        text_color="#03161A" if on else T["TEXT"], border_color=T["ACCENT"] if on else T["BORDER"])
+            site, required = research.LOGIN.get(k, (None, False))
+            need = bool(site and required and not platform_login.is_logged_in(site))
+            if need and on:
+                locked.append(platform_login.SITES[site]["label"])
+            b.configure(text=research.PLATFORMS[k]["label"] + (" 🔒" if need else " ✓" if site and required else ""),
+                        fg_color=T["ACCENT"] if on else T["CARD2"], hover_color=T["ACCENT_HOVER"] if on else T["BORDER"],
+                        text_color="#03161A" if on else T["TEXT"],
+                        border_color=T["ACCENT"] if on else ("#FBBF24" if need else T["BORDER"]))
         hints = [research.PLATFORMS[k].get("hint") for k in research.PLATFORMS if k in self.rs_plats]
-        self.rs_plat_hint.configure(text="  ".join(dict.fromkeys(h for h in hints if h)))
+        text = "  ".join(dict.fromkeys(h for h in hints if h))
+        if locked:
+            text = (f"🔒 {', '.join(locked)} yêu cầu đăng nhập: bấm nút 🔒 tương ứng bên dưới để đăng nhập trước khi "
+                    f"quét. ") + text
+        self.rs_plat_hint.configure(text=text, text_color="#FBBF24" if locked else T["MUTED"])
 
     def _rs_filters(self):
         def num(e):
@@ -348,8 +367,9 @@ class ResearchMixin:
                                fg_color=T["ACCENT"] if x["hot"] >= 70 else T["CARD2"],
                                text_color="#03161A" if x["hot"] >= 70 else T["TEXT"], font=self.font(17, "bold"))
             hot.grid(row=0, column=1, rowspan=3, padx=6)
-            th = ctk.CTkLabel(row, text="", width=160, height=90, fg_color=T["CARD2"], corner_radius=8)
+            th = ctk.CTkLabel(row, text="", width=160, height=90, fg_color=T["CARD2"], corner_radius=8, cursor="hand2")
             th.grid(row=0, column=2, rowspan=3, padx=8, pady=10)
+            th.bind("<Button-1>", lambda _e, x=x: self.open_player(x))
             self._rs_thumb_labels[x["url"]] = th
             if x["url"] in self._rs_imgs:
                 th.configure(image=self._rs_imgs[x["url"]])
@@ -366,17 +386,20 @@ class ResearchMixin:
                          corner_radius=5, fg_color=PLAT_COLORS.get(x["platform"], T["CARD2"])).grid(row=0, column=0,
                                                                                                    ipadx=5, padx=(0, 6))
             self.muted(mrow, meta, 12).grid(row=0, column=1, sticky="w")
-            tags = ctk.CTkFrame(row, fg_color="transparent")
+            tags = ctk.CTkFrame(row, fg_color="transparent", height=4)
             tags.grid(row=2, column=3, sticky="nw", pady=(2, 10))
             for j, t in enumerate(x.get("tags", [])):
                 ctk.CTkLabel(tags, text=t, font=self.font(11, "bold"), text_color="white", corner_radius=6, height=20,
                              fg_color=TAG_COLORS.get(t.split(" x")[0], T["CARD2"])).grid(row=0, column=j, padx=(0, 5), ipadx=6)
             btns = ctk.CTkFrame(row, fg_color="transparent")
             btns.grid(row=0, column=4, rowspan=3, padx=(6, 14))
-            self.button(btns, "Xem", lambda u=x["url"]: webbrowser.open(u), width=70, height=32).grid(row=0, column=0,
-                                                                                                     pady=3)
+            self.button(btns, "▶ Xem", lambda x=x: self.open_player(x), width=90, height=30).grid(row=0, column=0,
+                                                                                                  pady=2)
+            sv = self.button(btns, "🔖 Lưu", None, width=90, height=30)
+            sv.configure(command=lambda x=x, sv=sv: self.save_link_menu(x, sv))
+            sv.grid(row=1, column=0, pady=2)
             self.button(btns, "Cắt ngay", lambda u=x["url"]: self.enqueue([u], front=True), primary=True, width=90,
-                        height=32).grid(row=1, column=0, pady=3)
+                        height=30).grid(row=2, column=0, pady=2)
         self._rs_upd_sel()
 
     def _rs_load_thumb(self, key, url):

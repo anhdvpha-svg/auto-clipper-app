@@ -52,9 +52,9 @@ def _explain(text, url="", tried=()):
                     "bạn đang đăng nhập YouTube (Firefox ổn định nhất; với Chrome/Edge hãy đóng trình duyệt trước), rồi thử lại."
                     + tried_txt)
         return (f"{site} chỉ cho xem video này khi đã đăng nhập (bài giới hạn đối tượng/độ tuổi hoặc tài khoản riêng tư)."
-                f"{tried_txt}\nCách sửa: đăng nhập {site} trên Firefox (hoặc Chrome/Edge), vào Cài đặt → Tải video chọn "
-                f"trình duyệt đó; hoặc xuất file cookies.txt (tiện ích 'Get cookies.txt LOCALLY') và chọn trong Cài đặt. "
-                f"Cũng có thể tự tải video về rồi bấm 'Tải file lên'.")
+                f"{tried_txt}\nCách sửa: bấm nút '🔒 {site}' ở trang Khám phá nguồn (hoặc Cài đặt → Tải video) để đăng "
+                f"nhập một lần ngay trong app, app sẽ nhớ phiên cho các lần sau. Hoặc chọn trình duyệt đã đăng nhập / "
+                f"file cookies.txt trong Cài đặt, hoặc tự tải video về rồi bấm 'Tải file lên'.")
     if "private video" in s or "members-only" in s or "join this channel" in s:
         return "Video riêng tư hoặc chỉ dành cho hội viên, không tải được."
     if "video unavailable" in s or "has been removed" in s or "not available in your country" in s:
@@ -168,8 +168,11 @@ class Downloader:
         Order: cookies.txt if given, else the chosen browser, else no login; when the site asks for a login
         (Instagram restricted reels, TikTok, age-gated YouTube...) every browser installed on the PC is tried."""
         os.makedirs(out_dir, exist_ok=True)
+        from . import platform_login
         cookies = cookies_file if cookies_file and os.path.isfile(cookies_file) else None
-        attempts = [("file", cookies)] if cookies else [("browser", browser)] if browser else [("none", None)]
+        site_ck = platform_login.cookies_for_url(url)  # logged in inside the app (Đăng nhập TikTok...)
+        attempts = [("file", cookies)] if cookies else [("site", site_ck)] if site_ck else \
+            [("browser", browser)] if browser else [("none", None)]
         tried, tried_stall, auto_added = [], False, False
         i, text = 0, ""
         while i < len(attempts):
@@ -178,9 +181,11 @@ class Downloader:
                 self.log(f"Dùng đăng nhập {site_of(url)} từ trình duyệt {val}...")
             elif kind == "file":
                 self.log("Dùng đăng nhập từ file cookies.txt...")
+            elif kind == "site":
+                self.log(f"Dùng phiên đăng nhập {site_of(url)} đã lưu trong app...")
             self.progress(0, "Đang lấy thông tin video...")
-            code, text = self._run_once(self._args(url, out_dir, max_height,
-                                                   val if kind == "browser" else None, val if kind == "file" else None))
+            code, text = self._run_once(self._args(url, out_dir, max_height, val if kind == "browser" else None,
+                                                   val if kind in ("file", "site") else None))
             if self.cancelled():
                 raise DownloadError("Đã huỷ.")
             video = os.path.join(out_dir, "source.mp4")

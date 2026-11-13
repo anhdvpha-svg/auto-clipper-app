@@ -6,10 +6,11 @@ import customtkinter as ctk
 from . import config, llm
 from .engine.render_clips import CAPTION_PRESETS
 from .research_ui import ResearchMixin
+from .links_ui import LinksMixin
 from .pipeline import Job, is_url
 
 APP_TITLE = "Auto Clipper"
-VERSION = "1.8"
+VERSION = "1.9"
 
 # ---- palette (dark, cyan accent - CapCut desktop feel) ----
 BG = "#0E0F12"
@@ -91,7 +92,7 @@ def key_of(pairs, label):
     return next((k for k, v in pairs if v == label), pairs[0][0])
 
 
-class App(ResearchMixin, ctk.CTk):
+class App(ResearchMixin, LinksMixin, ctk.CTk):
     def __init__(self):
         super().__init__()
         ctk.set_appearance_mode("dark")
@@ -122,6 +123,7 @@ class App(ResearchMixin, ctk.CTk):
         self._build_create()
         self._build_projects()
         self._build_research()
+        self._build_links()
         self._build_settings()
         self.show("create")
         self.after(100, self._poll)
@@ -185,7 +187,7 @@ class App(ResearchMixin, ctk.CTk):
         ctk.CTkLabel(logo, text="Auto Clipper", font=self.font(18, "bold"), text_color=TEXT).grid(row=0, column=1)
         self.nav = {}
         for i, (key, text) in enumerate((("create", "✂   Tạo clip"), ("research", "◎   Khám phá nguồn"),
-                                         ("projects", "▦   Dự án"),
+                                         ("links", "🔖   Kho link"), ("projects", "▦   Dự án"),
                                          ("settings", "⚙   Cài đặt")), start=1):
             b = ctk.CTkButton(sb, text=text, anchor="w", height=42, corner_radius=10, font=self.font(14),
                               fg_color="transparent", hover_color=CARD2, text_color=MUTED,
@@ -202,6 +204,8 @@ class App(ResearchMixin, ctk.CTk):
             b.configure(fg_color=CARD2 if k == key else "transparent", text_color=TEXT if k == key else MUTED)
         if key == "projects":
             self._refresh_projects()
+        if key == "links":
+            self._lk_refresh()
 
     # ---------------- create page ----------------
     def _build_create(self):
@@ -797,8 +801,14 @@ class App(ResearchMixin, ctk.CTk):
                        "trình duyệt có trên máy khi trang đòi đăng nhập.", 12, wraplength=860).grid(row=1, column=0, sticky="w", padx=20)
         self.browser = self.seg(dl, BROWSERS, self.cfg.get("browser", ""), lambda _: self._save_settings())
         self.browser.grid(row=2, column=0, sticky="w", padx=20, pady=(10, 6))
+        lg = ctk.CTkFrame(dl, fg_color="transparent")
+        lg.grid(row=4, column=0, sticky="ew", padx=20, pady=(0, 16))
+        self.muted(lg, "Đăng nhập ngay trong app (khuyên dùng): bấm nút, đăng nhập như trên web, app nhớ phiên cho mọi "
+                       "lần tải sau.", 12, wraplength=860).grid(row=0, column=0, sticky="w", pady=(0, 6))
+        self.login_buttons(lg, ["tiktok", "instagram", "facebook", "x", "twitch", "youtube"]).grid(row=1, column=0,
+                                                                                                   sticky="w")
         ck = ctk.CTkFrame(dl, fg_color="transparent")
-        ck.grid(row=3, column=0, sticky="ew", padx=20, pady=(4, 18))
+        ck.grid(row=3, column=0, sticky="ew", padx=20, pady=(4, 12))
         ck.grid_columnconfigure(1, weight=1)
         self.muted(ck, "Hoặc file cookies.txt", 13).grid(row=0, column=0, sticky="w", padx=(0, 10))
         self.cookies = ctk.CTkEntry(ck, height=34, corner_radius=10, border_width=0, fg_color=CARD2, font=self.font(12),
@@ -1015,6 +1025,8 @@ class App(ResearchMixin, ctk.CTk):
                         self.key_status[p].configure(text="Tài khoản chưa có model phù hợp.", text_color=DANGER)
                 elif kind.startswith("rs_"):
                     self._rs_handle(kind, data)
+                elif kind.startswith("lk_"):
+                    self._lk_handle(kind, data)
                 elif kind == "done":
                     res, err = data
                     self.job = None

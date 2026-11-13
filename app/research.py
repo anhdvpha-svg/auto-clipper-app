@@ -17,6 +17,10 @@ class ResearchError(Exception):
 
 # platform key -> label, how a keyword is used ("search", "tag" = hashtag page, "channel" = the words are channel
 # names, None = channels only), and a hint shown under the chips
+# which in-app login (platform_login.SITES) each platform uses, and whether it is required to scan it
+LOGIN = {"tiktok": ("tiktok", True), "instagram": ("instagram", True), "x": ("x", True),
+         "twitch": ("twitch", False), "yt_long": ("youtube", False), "yt_shorts": ("youtube", False)}
+
 PLATFORMS = {
     "yt_long":   {"label": "YouTube video dài", "kw": "search", "name": "YouTube"},
     "yt_shorts": {"label": "YouTube Shorts", "kw": "search", "name": "YouTube Shorts"},
@@ -92,28 +96,34 @@ class Researcher:
         self.ytdlp, self.deno, self.browser, self.log = ytdlp, deno, browser, log
         self.cookies = cookies if cookies and os.path.isfile(cookies) else None
 
-    def _base(self):
+    def _base(self, url=""):
+        from . import platform_login
         a = [self.ytdlp, "--no-warnings", "--ignore-errors", "--ignore-config"]
         if self.deno:
             a += ["--js-runtimes", f"deno:{self.deno}"]
+        site_ck = platform_login.cookies_for_url(url)
         if self.cookies:
             a += ["--cookies", self.cookies]
+        elif site_ck:
+            a += ["--cookies", site_ck]
         elif self.browser:
             a += ["--cookies-from-browser", self.browser]
         return a
 
     def _json(self, args, timeout=150):
+        url = next((x for x in reversed(args) if str(x).startswith("http")), "")
         try:
-            r = subprocess.run(self._base() + args, capture_output=True, text=True, encoding="utf-8",
+            r = subprocess.run(self._base(url) + args, capture_output=True, text=True, encoding="utf-8",
                                errors="replace", stdin=subprocess.DEVNULL, timeout=timeout)
         except subprocess.TimeoutExpired:
             raise ResearchError("Hết thời gian chờ phản hồi từ nền tảng. Thử lại sau.")
         out = r.stdout.strip()
         if not out:
             err = (r.stderr.strip().splitlines() or ["không rõ lỗi"])[-1]
-            if "sign in" in err.lower() or "not a bot" in err.lower() or "login" in err.lower():
-                raise ResearchError("Nền tảng yêu cầu đăng nhập. Vào Cài đặt → Tải video, chọn trình duyệt bạn đang "
-                                    "đăng nhập rồi thử lại.")
+            if "sign in" in err.lower() or "not a bot" in err.lower() or "login" in err.lower() \
+                    or "log in" in err.lower() or "cookies" in err.lower():
+                raise ResearchError(f"{platform_of(url)} yêu cầu đăng nhập: bấm nút 🔒 {platform_of(url)} ở trên để "
+                                    "đăng nhập một lần trong app.")
             raise ResearchError(f"Không lấy được danh sách: {err[:200]}")
         try:
             d = json.loads(out[out.index("{"):])
@@ -121,8 +131,8 @@ class Researcher:
             d = None
         if not d:
             if any("tiktok.com" in str(a) for a in args):
-                raise ResearchError("TikTok chặn xem danh sách khi chưa đăng nhập. Vào Cài đặt → Tải video, chọn "
-                                    "trình duyệt bạn đang đăng nhập TikTok rồi quét lại.")
+                raise ResearchError("TikTok chặn xem danh sách khi chưa đăng nhập: bấm nút 🔒 TikTok ở trên để đăng "
+                                    "nhập một lần trong app rồi quét lại.")
             raise ResearchError("Nền tảng không trả về dữ liệu (bị chặn hoặc link sai).")
         return d
 
@@ -234,8 +244,8 @@ class Researcher:
         entries = [e for e in (d.get("entries") or []) if e]
         if not entries:
             if plat in ("Instagram", "TikTok", "X"):
-                raise ResearchError(f"{plat} không trả về video (thường do chưa đăng nhập): chọn trình duyệt đã đăng "
-                                    f"nhập {plat} hoặc file cookies.txt trong Cài đặt → Tải video.")
+                raise ResearchError(f"{plat} không trả về video vì chưa đăng nhập: bấm nút 🔒 {plat} ở trên để đăng "
+                                    f"nhập một lần trong app (app nhớ phiên cho lần sau).")
             raise ResearchError(f"Không lấy được video từ {url} (nền tảng chặn hoặc kênh trống).")
         out = [self._norm(e, plat, d.get("uploader") or d.get("channel") or d.get("title")) for e in entries]
         # channel median: what this channel normally gets, for the "vượt trội" (outlier) score

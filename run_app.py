@@ -113,6 +113,32 @@ def selftest(out_dir):
         assert img.size == (540, 960) and "cap" in handles and "hook" in handles, (img.size, handles)
         jc = [r.get("jump_cuts") for r in data["rendered"]]
         log(f"preview ok; jump cuts per clip: {jc}")
+        # in-app player: frames must come out of the decoder (sound card optional on CI)
+        from app import player as _pl
+        pinfo = _pl.resolve(video, None)
+        pp = _pl.Player(pinfo, 640, 360)
+        pp.start(5)
+        t0, shown = time.time(), 0
+        while time.time() - t0 < 4:
+            shown += bool(pp.frame())
+            time.sleep(0.02)
+        pp.stop()
+        assert shown > 20, f"player showed only {shown} frames"
+        try:
+            import sounddevice as _sd  # noqa: F401
+            snd = "sounddevice ok"
+        except Exception as e:
+            snd = f"sounddevice unavailable: {e}"
+        log(f"player ok: {shown} frames in 4 s; {snd}")
+        # in-app login window: the embedded browser must start (non-fatal: depends on WebView2 on the machine)
+        try:
+            import webview  # noqa: F401
+            cmd = [sys.executable, "--login", "tiktok", "4"] if getattr(sys, "frozen", False) else \
+                [sys.executable, os.path.abspath(__file__), "--login", "tiktok", "4"]
+            r = subprocess.run(cmd, timeout=90)
+            log(f"login window check: exit {r.returncode}")
+        except Exception as e:
+            log(f"login window check (non-fatal): {e}")
         # Whisper must work in the frozen app (model download + our ffmpeg decoder + ctranslate2)
         from app.engine import transcribe
         wd = os.path.join(out_dir, "whisper")
@@ -150,6 +176,9 @@ def selftest(out_dir):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) >= 3 and sys.argv[1] == "--login":  # in-app login window (own process)
+        from app import platform_login
+        sys.exit(platform_login.run_login_window(sys.argv[2], close_after=float(sys.argv[3]) if len(sys.argv) > 3 else None))
     if len(sys.argv) >= 2 and sys.argv[1] == "--selftest":
         sys.exit(selftest(sys.argv[2] if len(sys.argv) > 2 else os.path.join(os.getcwd(), "selftest")))
     from app.main import main

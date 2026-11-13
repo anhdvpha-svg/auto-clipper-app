@@ -23,6 +23,9 @@ args = [
     "--collect-binaries", "onnxruntime",
     "--collect-data", "cv2",
     "--collect-submodules", "app",
+    "--collect-all", "webview",            # in-app login window (Edge WebView2)
+    "--collect-all", "sounddevice",        # sound for the in-app video player
+
     "--hidden-import", "PIL._tkinter_finder",
     "--exclude-module", "matplotlib",
     "--exclude-module", "pytest",
@@ -30,6 +33,9 @@ args = [
     "--workpath", os.path.join(ROOT, "build", "pyi"),
     "--specpath", os.path.join(ROOT, "build"),
 ]
+if sys.platform == "win32":
+    args += ["--collect-all", "pythonnet", "--collect-all", "clr_loader", "--hidden-import", "clr",
+             "--collect-all", "_sounddevice_data"]
 if sys.platform == "darwin":
     args += ["--osx-bundle-identifier", "app.autoclipper"]
 

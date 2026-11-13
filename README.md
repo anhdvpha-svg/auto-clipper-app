@@ -45,6 +45,12 @@ API key được mã hoá bằng Windows DPAPI (gắn với tài khoản Windows
   (nhiều view gấp ≥2 lần mức thường của kênh), sắp xếp theo Hot / view/giờ / vượt trội / lượt xem / mới nhất.
 - Mỗi video có **điểm Hot** (tốc độ tăng view mỗi giờ, độ mới, độ dài phù hợp để cắt, tương tác, mức vượt trội) và nhãn
   *Vượt trội x5*, *Đang lên*, *Mới*, *Dài*, *Đã cắt*.
+- **▶ Xem** ngay trong app (không cần mở trình duyệt): video, lượt xem/thích, **caption / mô tả** và **lời thoại** của
+  video, có nút Copy caption / Copy hashtag / Copy link.
+- **🔖 Lưu** link vào **Kho link**, chia theo dự án / campaign: xem lại, copy tất cả link, cắt cả dự án một lần,
+  dán thêm link bằng tay.
+- **Đăng nhập nền tảng ngay trong app** (TikTok, Instagram, X, Facebook, Twitch, YouTube): nút 🔒 mở cửa sổ đăng
+  nhập, đăng nhập như trên web, app nhớ phiên cho mọi lần quét và tải sau. Nền tảng cần đăng nhập có dấu 🔒 trên nút chọn.
 - Tick nhiều video → **Thêm vào hàng chờ**: app tự tải và cắt lần lượt với cài đặt ở trang Tạo clip.
 
 ## Tính năng
