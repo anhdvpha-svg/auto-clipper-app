@@ -14,7 +14,9 @@ Lần chạy đầu, app tự tải các công cụ cần thiết (yt-dlp, ffmpe
 
 ## Cách dùng
 
-1. **Video**: dán link YouTube, Facebook hoặc TikTok, hoặc bấm *Chọn file...*.
+1. **Video**: dán link YouTube, TikTok, Instagram, Facebook, Twitch..., hoặc bấm *Tải file lên*.
+   Bài Instagram/TikTok giới hạn đối tượng cần đăng nhập: app tự thử lấy đăng nhập từ trình duyệt trên máy; hoặc chọn
+   trình duyệt / file `cookies.txt` trong **Cài đặt → Tải video**.
 2. **AI chọn đoạn hay**:
    - *Offline*: miễn phí, chọn đoạn theo âm lượng, chuyển động và câu mở đầu.
    - *Claude / ChatGPT / Gemini*: dán API key, bấm **Tải danh sách** rồi chọn model. AI chọn đoạn, chấm điểm viral, viết tiêu đề hook và caption. Bạn trả phí cho nhà cung cấp theo lượt dùng.
@@ -24,27 +26,38 @@ Lần chạy đầu, app tự tải các công cụ cần thiết (yt-dlp, ffmpe
 3. **Clip**: số clip, độ dài, và ô *Chỉ lấy* để chọn theo chủ đề (ví dụ "những đoạn hài hước", "đoạn nói về marketing").
 4. Bấm **Tạo clip**. Clip, ảnh bìa và `report.md` (điểm viral, caption, hashtag) được lưu vào
    `Videos\AutoClipper\<ngày>\<giờ> - <tên video>\`.
-5. Mỗi clip có nút **Xem clip**, **✎ Sửa** (tiêu đề hook, phụ đề, thời lượng, âm thanh, caption), **Copy** caption và
-   **Vị trí** (mở thư mục, chọn sẵn file).
+5. Mỗi clip có nút **Xem clip**, **✎ Sửa**, **Copy** caption và **Vị trí** (mở thư mục, chọn sẵn file).
+   Trình **✎ Sửa** có khung xem trước trực tiếp: kéo tiêu đề/phụ đề để di chuyển, lăn chuột để đổi cỡ, kéo ngang hình để
+   dời khung dọc của từng cảnh, nhấp đúp để đổi Lấp đầy ↔ Nền mờ, nút zoom 1x/1.2x/1.4x; 10 kiểu chữ phụ đề, 6 phông và
+   7 kiểu khung tiêu đề.
 6. Trang **Dự án**: xem theo ngày, tìm theo tên, xem dung lượng, đổi tên, dọn file tạm (video gốc đã tải) hoặc xoá dự án.
 
 API key được mã hoá bằng Windows DPAPI (gắn với tài khoản Windows của bạn) và chỉ gửi tới nhà cung cấp AI bạn chọn.
 
 ## Khám phá nguồn (tìm video để clip)
 
-- **Tìm theo từ khoá** (YouTube): lọc theo thời gian đăng, độ dài, sắp xếp theo lượt xem/mới nhất.
-- **Kênh theo dõi**: dán link kênh YouTube, Twitch, Kick hoặc TikTok của các creator trong campaign; app gom video mới
-  nhất của tất cả các kênh.
-- Mỗi video có **điểm Hot** (tốc độ tăng view mỗi giờ, độ mới, độ dài phù hợp để cắt, tương tác) và nhãn *Đang lên*,
-  *Mới*, *Dài*, *Đã cắt*.
+- **Chọn nền tảng để quét**: YouTube video dài, YouTube Shorts, TikTok, Instagram Reels, Twitch, Kick, Dailymotion,
+  Bilibili, X (Twitter), Rumble. Nhiều từ khoá cách nhau bằng dấu phẩy.
+  - TikTok/Instagram tìm theo hashtag và cần đăng nhập (trình duyệt hoặc `cookies.txt`).
+  - Twitch/Kick/X/Rumble không có tìm kiếm công khai: gõ tên kênh, app lấy clip hot 7 ngày + VOD mới (Twitch).
+- **Kênh theo dõi**: dán link kênh của các creator trong campaign; app gom video mới nhất của tất cả các kênh.
+- **Bộ lọc viral**: lượt xem tối thiểu, view/giờ tối thiểu, điểm Hot tối thiểu, loại trừ từ, chỉ video **vượt trội**
+  (nhiều view gấp ≥2 lần mức thường của kênh), sắp xếp theo Hot / view/giờ / vượt trội / lượt xem / mới nhất.
+- Mỗi video có **điểm Hot** (tốc độ tăng view mỗi giờ, độ mới, độ dài phù hợp để cắt, tương tác, mức vượt trội) và nhãn
+  *Vượt trội x5*, *Đang lên*, *Mới*, *Dài*, *Đã cắt*.
 - Tick nhiều video → **Thêm vào hàng chờ**: app tự tải và cắt lần lượt với cài đặt ở trang Tạo clip.
-- TikTok chặn xem danh sách khi chưa đăng nhập: chọn trình duyệt đang đăng nhập trong Cài đặt → Tải video.
 
 ## Tính năng
 
 - Tự tải video và phụ đề từ link. Có phụ đề YouTube thì dùng luôn, không có thì tự chép lời bằng Whisper (chạy offline, hỗ trợ tiếng Việt).
-- Đổi khung **theo từng cảnh**: cận cảnh thì cắt kín bám theo mặt hoặc người, cảnh rộng thì giữ nguyên khung trên nền mờ. Tự cắt viền đen có sẵn trong video.
-- Thẻ **tiêu đề hook** ở đầu clip và **phụ đề tô màu từng từ** (có chế độ in hoa, chọn được màu).
+- Đổi khung **theo từng cảnh** bằng bộ nhận diện khuôn mặt YuNet: bám người đang nói (nhận ra miệng đang mấp máy),
+  lia theo mặt di chuyển, tự zoom 1.2–1.4x vào mặt nhỏ ở cảnh rộng, không có người thì bám vào chỗ có hành động; cảnh
+  có nhiều người đứng xa nhau thì giữ nguyên khung trên nền mờ. Tự cắt viền đen có sẵn trong video.
+- **AI chọn khung hình** (khi dùng Claude/ChatGPT/Gemini/API): AI xem ảnh từng cảnh để chọn mặt, biểu cảm hoặc hành động cần bám.
+- **Nhịp dựng giữ chân người xem**: cắt khoảng lặng và từ đệm ("ừm", "à", "uh"), tô màu từ khoá (số, tiền, từ mạnh),
+  thanh tiến trình dưới đáy video.
+- Thẻ **tiêu đề hook** ở đầu clip và **phụ đề tô màu từng từ** với 10 kiểu chữ trend: Cổ điển vàng, Hormozi, MrBeast,
+  Hộp màu, Neon, Karaoke, Từng chữ, Tối giản, Nền đen, Viết tay.
 - Âm lượng chuẩn hoá -14 LUFS, giữ nguyên fps gốc (tối đa 60), kết thúc bằng màn đen.
 - Chọn đoạn theo chủ đề, giống tính năng ClipAnything.
 
@@ -66,4 +79,6 @@ Bộ cài Windows được build tự động bằng GitHub Actions (`.github/wo
 
 Phần xử lý trong `app/engine/` dùng chung với skill `auto-clipper` của Claude.
 
-Font Inter được dùng theo giấy phép SIL Open Font License (`assets/fonts/LICENSE-Inter.txt`).
+Font Inter, Anton, Bangers, Be Vietnam Pro, Paytone One và Patrick Hand được dùng theo giấy phép SIL Open Font License
+(`assets/fonts/LICENSE-*.txt`). Model nhận diện khuôn mặt YuNet (OpenCV Zoo) theo giấy phép MIT
+(`assets/models/LICENSE-yunet.txt`).

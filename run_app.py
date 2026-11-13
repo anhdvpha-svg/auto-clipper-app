@@ -29,6 +29,8 @@ if os.name == "nt":
 try:
     _base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
     os.environ.setdefault("AUTOCLIPPER_FONTS", os.path.join(_base, "assets", "fonts"))
+    os.environ.setdefault("AUTOCLIPPER_FACE_MODEL",
+                          os.path.join(_base, "assets", "models", "face_detection_yunet_2023mar.onnx"))
 except Exception:
     pass
 
@@ -49,6 +51,9 @@ def selftest(out_dir):
         import cv2, numpy, PIL, anthropic, httpx, faster_whisper  # noqa: F401  (bundling check)
         log(f"imports ok; cv2 {cv2.__version__}; cascade "
             f"{os.path.exists(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')}")
+        from app.engine import analyze_video
+        assert analyze_video._yunet(640, 360) is not None, f"YuNet face model not loaded ({analyze_video._face_model()})"
+        log("yunet ok")
         ff = tools.ensure(log)["ffmpeg"]
         video = os.path.join(out_dir, "test.mp4")
         subprocess.run([ff, "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30:duration=70",
@@ -72,7 +77,8 @@ def selftest(out_dir):
                 f.write(f"{ts(s)} --> {ts(e)}\n{l}\n\n")
         cfg = config.load()
         cfg.update({"provider": "offline", "num_clips": 2, "length": "15-30", "output_dir": os.path.join(out_dir, "out"),
-                    "framing": "auto", "topic": ""})
+                    "framing": "auto", "topic": "", "caption_preset": "hormozi", "jumpcut": True,
+                    "progress_bar": True, "emphasis": True})
         result = {}
         done = threading.Event()
         job = pipeline.Job(video, cfg, log, lambda f, t: log(f"[{f:.0%}] {t}"),
@@ -97,6 +103,16 @@ def selftest(out_dir):
             gaps = [b - a for a, b in zip(ts, ts[1:]) if b - a > 0.1 or b - a < 0.001]
             assert ts and ts[0] < 0.05 and not gaps, f"audio timestamps broken: start={ts[:1]} bad={len(gaps)}"
             log(f"clip ok: {os.path.basename(c['file'])} {c['length']}s, audio continuous ({len(ts)} packets)")
+        # the editor's live preview (framing + ASS captions + hook) must render a frame
+        from app.editor import load_project, transcript_words
+        from app.preview import Preview
+        proj, data = load_project(result["r"]["out_dir"])
+        pv = Preview(proj, transcript_words(proj))
+        clip = dict(data["clips"][0], caption_style={"preset": "beast", "y": 0.6}, hook_style={"font": "Anton", "y": 0.2})
+        img, handles, info = pv.render(clip, 2.0)
+        assert img.size == (540, 960) and "cap" in handles and "hook" in handles, (img.size, handles)
+        jc = [r.get("jump_cuts") for r in data["rendered"]]
+        log(f"preview ok; jump cuts per clip: {jc}")
         # Whisper must work in the frozen app (model download + our ffmpeg decoder + ctranslate2)
         from app.engine import transcribe
         wd = os.path.join(out_dir, "whisper")

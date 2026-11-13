@@ -83,6 +83,33 @@ JSON_SHAPE = """Return exactly this JSON shape:
  "notes": str}"""
 
 
+CLIP_TASK = {"system": SYSTEM, "schema": CLIP_SCHEMA, "shape": JSON_SHAPE}
+
+FRAME_SYSTEM = """You are the camera operator reframing horizontal video into vertical 9:16 shorts (TikTok, Reels, Shorts).
+For every numbered frame you decide how the vertical phone frame shows that shot. Answer with JSON only.
+- "fill": crop a vertical window and fill the screen. Point it at what a viewer wants to see: the face of the person
+  talking or reacting, a strong expression, the hands doing the action, the ball, the product. Faces beat background.
+- "fit": keep the whole frame (shown smaller over a blurred copy) - only when the important things are far apart
+  (two people talking across the frame, a wide action, on-screen text or a slide that must stay readable).
+focus_x: horizontal centre of the vertical window, 0 = left edge, 1 = right edge (use the ruler under each frame).
+zoom: 1 normal, 1.2 or 1.4 to punch in on a face or detail that is small in a wide shot (keep 1 if unsure).
+focus: 2-5 words naming what you framed."""
+
+FRAME_SCHEMA = {
+    "type": "object",
+    "properties": {"shots": {"type": "array", "items": {
+        "type": "object",
+        "properties": {"id": {"type": "integer"}, "layout": {"type": "string", "enum": ["fill", "fit"]},
+                       "focus_x": {"type": "number"}, "zoom": {"type": "number"}, "focus": {"type": "string"}},
+        "required": ["id", "layout", "focus_x", "zoom", "focus"], "additionalProperties": False}}},
+    "required": ["shots"], "additionalProperties": False,
+}
+
+FRAME_TASK = {"system": FRAME_SYSTEM, "schema": FRAME_SCHEMA,
+              "shape": 'Return exactly: {"shots": [{"id": int, "layout": "fill"|"fit", "focus_x": 0..1, '
+                       '"zoom": 1|1.2|1.4, "focus": str}]}'}
+
+
 class AIError(Exception):
     """A message that can be shown to the user as-is."""
 
@@ -177,20 +204,20 @@ def _claude_client(key):
     return anthropic.Anthropic(api_key=key, max_retries=3, timeout=900)
 
 
-def _claude_call(key, model, user_text, images):
+def _claude_call(key, model, user_text, images, task=CLIP_TASK):
     import anthropic
     client = _claude_client(key)
     content = [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b}} for b in images]
     content.append({"type": "text", "text": user_text})
-    base = dict(model=model, max_tokens=16000, system=SYSTEM, messages=[{"role": "user", "content": content}])
-    structured = {"output_config": {"format": {"type": "json_schema", "schema": CLIP_SCHEMA}}}
+    base = dict(model=model, max_tokens=16000, system=task["system"], messages=[{"role": "user", "content": content}])
+    structured = {"output_config": {"format": {"type": "json_schema", "schema": task["schema"]}}}
     attempts = []
     if model in _CLAUDE_FALLBACK_MODELS:
         attempts.append(("fallback", {**base, **structured}))
     attempts.append(("plain", {**base, **structured}))
     # older models without structured outputs: ask for JSON in the prompt instead
     attempts.append(("plain", {**base, "messages": [{"role": "user", "content": content[:-1] + [
-        {"type": "text", "text": user_text + "\n\n" + JSON_SHAPE}]}]}))
+        {"type": "text", "text": user_text + "\n\n" + task["shape"]}]}]}))
     last_err = None
     for kind, kwargs in attempts:
         try:
@@ -254,9 +281,10 @@ def _http_error(name, r):
 OPENAI_BASE = "https://api.openai.com/v1"
 
 
-def _chat_call(key, model, user_text, images, base=OPENAI_BASE, name="ChatGPT"):
+def _chat_call(key, model, user_text, images, base=OPENAI_BASE, name="ChatGPT", task=CLIP_TASK):
     """OpenAI chat-completions format: OpenAI itself and any compatible gateway (vilao.ai, OpenRouter...)."""
     url = base.rstrip("/") + "/chat/completions"
+    SYSTEM, JSON_SHAPE = task["system"], task["shape"]
     content = [{"type": "text", "text": user_text + "\n\n" + JSON_SHAPE}]
     content += [{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b}"}} for b in images]
     body = {"model": model, "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": content}],
@@ -264,7 +292,7 @@ def _chat_call(key, model, user_text, images, base=OPENAI_BASE, name="ChatGPT"):
     headers = {"Authorization": f"Bearer {key}"}
     try:
         r = httpx.post(url, json=body, timeout=900, headers=headers)
-        if r.status_code == 400 and (images or "response_format" in r.text):
+        if r.status_code == 400 and (images or "response_format" in r.text) and task is CLIP_TASK:
             # some gateways/models reject images or JSON mode: retry plain text, JSON asked for in the prompt
             body2 = {"model": model, "messages": [{"role": "system", "content": SYSTEM},
                                                   {"role": "user", "content": user_text + "\n\n" + JSON_SHAPE}]}
@@ -282,8 +310,8 @@ def _chat_call(key, model, user_text, images, base=OPENAI_BASE, name="ChatGPT"):
     return _parse_json(msg.get("content"))
 
 
-def _openai_call(key, model, user_text, images):
-    return _chat_call(key, model, user_text, images)
+def _openai_call(key, model, user_text, images, task=CLIP_TASK):
+    return _chat_call(key, model, user_text, images, task=task)
 
 
 def _list_chat_models(key, base, name):
@@ -320,11 +348,11 @@ def _check_google_key(key):
                       "(Cài đặt → Tài khoản AI → API tuỳ chỉnh → bấm vilao.ai).")
 
 
-def _gemini_call(key, model, user_text, images):
+def _gemini_call(key, model, user_text, images, task=CLIP_TASK):
     _check_google_key(key)
-    parts = [{"text": user_text + "\n\n" + JSON_SHAPE}]
+    parts = [{"text": user_text + "\n\n" + task["shape"]}]
     parts += [{"inlineData": {"mimeType": "image/jpeg", "data": b}} for b in images]
-    body = {"systemInstruction": {"parts": [{"text": SYSTEM}]},
+    body = {"systemInstruction": {"parts": [{"text": task["system"]}]},
             "contents": [{"role": "user", "parts": parts}],
             "generationConfig": {"responseMimeType": "application/json"}}
     model = model.removeprefix("models/")
@@ -363,10 +391,10 @@ def _gemini_models(key):
 
 # ---------------- public API ----------------
 
-def _custom_call(key, model, user_text, images, base=None):
+def _custom_call(key, model, user_text, images, base=None, task=CLIP_TASK):
     if not base:
         raise AIError("Chưa nhập địa chỉ API cho 'API tuỳ chỉnh' (ví dụ https://api.vilao.ai/v1).")
-    return _chat_call(key, model, user_text, images, base=base, name="API tuỳ chỉnh")
+    return _chat_call(key, model, user_text, images, base=base, name="API tuỳ chỉnh", task=task)
 
 
 def _custom_models(key, base=None):
@@ -419,3 +447,23 @@ def select_clips(provider, model, key, ctx, log=print, base=None):
         if data.get("notes"):
             notes.append(str(data["notes"]))
     return all_clips, " ".join(notes)
+
+
+def frame_shots(provider, model, key, sheet_path, ids, base=None):
+    """AI camera operator: one contact sheet of numbered shots -> {id: {layout, focus_x, zoom, focus}}."""
+    text = ("Frames to reframe (numbers printed top-left of each frame): " + ", ".join(f"#{i}" for i in ids) +
+            ". The yellow box is the current automatic crop; improve it where it misses the face, the expression "
+            "or the action.")
+    args = (key, model, text, [_jpeg_b64(sheet_path, max_w=1600)])
+    data = _CALL[provider](*args, base=base, task=FRAME_TASK) if provider == "custom" else \
+        _CALL[provider](*args, task=FRAME_TASK)
+    out = {}
+    for sh in data.get("shots") or []:
+        try:
+            out[int(sh["id"])] = {"layout": "fit" if sh.get("layout") == "fit" else "fill",
+                                  "crop_x": max(0.0, min(1.0, float(sh.get("focus_x", 0.5)))),
+                                  "zoom": min(1.4, max(1.0, float(sh.get("zoom") or 1.0))),
+                                  "focus": str(sh.get("focus", ""))[:60]}
+        except (TypeError, ValueError, KeyError):
+            continue
+    return out

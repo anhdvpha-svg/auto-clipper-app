@@ -10,7 +10,7 @@ Usage:
   python transcribe.py VIDEO --out-dir work/ --srt subs.srt   # import existing .srt/.vtt instead
 Options: --model small|medium|large-v3 (default small), --language vi|en (default auto)
 """
-import argparse, json, os, re, subprocess, sys
+import argparse, html, json, os, re, subprocess, sys
 
 
 def probe_duration(path):
@@ -56,7 +56,11 @@ NOISE = re.compile(r"\[[^\]]*\]|\([^)]*(?:music|nhạc|applause|vỗ tay|laugh|c
 
 
 def clean(text):
-    return re.sub(r"\s+", " ", NOISE.sub(" ", re.sub(r"<[^>]+>", "", text))).strip()
+    # tags first (<c>, <i>), then entities (&gt;&gt; is the ">>" speaker-change mark of YouTube captions,
+    # &amp; &#39; ...), then the speaker marks and sound annotations themselves
+    t = html.unescape(re.sub(r"<[^>]+>", "", text))
+    t = re.sub(r"^\s*-\s+|>>+|&gt;", " ", t)
+    return re.sub(r"\s+", " ", NOISE.sub(" ", t)).strip()
 
 
 WORD_TAG = re.compile(r"<(\d{1,2}:\d{2}:\d{2}[.,]\d{3}|\d{2}:\d{2}[.,]\d{3})>")

@@ -4,11 +4,12 @@ import glob, json, os, queue, subprocess, sys, threading, time, webbrowser
 import customtkinter as ctk
 
 from . import config, llm
+from .engine.render_clips import CAPTION_PRESETS
 from .research_ui import ResearchMixin
 from .pipeline import Job, is_url
 
 APP_TITLE = "Auto Clipper"
-VERSION = "1.7"
+VERSION = "1.8"
 
 # ---- palette (dark, cyan accent - CapCut desktop feel) ----
 BG = "#0E0F12"
@@ -32,12 +33,11 @@ KEY_LINKS = {"claude": "https://console.anthropic.com/settings/keys",
 NUMS = [("0", "Tự động"), ("3", "3"), ("5", "5"), ("8", "8"), ("10", "10")]
 MAX_CLIPS = 30
 LENGTHS = [("15-30", "15–30s"), ("30-60", "30–60s"), ("60-90", "60–90s")]
-ZOOMFX = [("off", "Tắt"), ("light", "Nhẹ"), ("medium", "Vừa"), ("strong", "Mạnh")]
 FRAMINGS = [("auto", "Tự động"), ("center", "Cắt giữa"), ("blur", "Nền mờ")]
 LANGS = [("auto", "Theo video"), ("vi", "Tiếng Việt"), ("en", "English")]
 ENCODERS = [("auto", "Nhanh nhất (GPU nếu có)"), ("x264", "Chỉ dùng CPU")]
-BROWSERS = [("", "Không dùng"), ("firefox", "Firefox"), ("chrome", "Chrome"), ("edge", "Edge"), ("brave", "Brave")]
-COLORS = ["FFE600", "22D3EE", "FF4FA3", "5BFF6B", "FFFFFF"]
+BROWSERS = [("", "Tự thử"), ("firefox", "Firefox"), ("chrome", "Chrome"), ("edge", "Edge"), ("brave", "Brave")]
+COLORS = ["", "FFE600", "22D3EE", "FF4FA3", "5BFF6B", "FFFFFF"]   # "" = the preset's own colour
 STEPS = ["Tải video", "Chép lời", "Phân tích hình ảnh", "Chọn đoạn hay", "Lên khung từng cảnh", "Dựng clip"]
 STEP_AT = [0.0, 0.15, 0.30, 0.45, 0.55, 0.65]
 
@@ -270,24 +270,45 @@ class App(ResearchMixin, ctk.CTk):
         row(2, 0, "Chỉ lấy đoạn về (không bắt buộc)", self.topic, span=2)
 
         style = ctk.CTkFrame(opt, fg_color="transparent")
-        row(3, 0, "Phong cách phụ đề", style, span=2)
-        self.color = self.cfg.get("highlight", "FFE600")
+        row(3, 0, "Kiểu chữ phụ đề (đổi riêng từng clip trong ✎ Sửa)", style, span=2)
+        self.preset_names = {v["label"]: k for k, v in CAPTION_PRESETS.items()}
+        cur_preset = self.cfg.get("caption_preset", "classic")
+        self.preset = ctk.CTkOptionMenu(style, values=list(self.preset_names), width=170, height=34, corner_radius=10,
+                                        fg_color=CARD2, button_color=CARD2, button_hover_color=BORDER,
+                                        dropdown_fg_color=CARD2, font=self.font(13), text_color=TEXT,
+                                        command=lambda _: self._preset_preview())
+        self.preset.set(CAPTION_PRESETS.get(cur_preset, CAPTION_PRESETS["classic"])["label"])
+        self.preset.grid(row=0, column=0, rowspan=2, sticky="w")
+        self.preset_img = ctk.CTkLabel(style, text="", width=240, height=74, fg_color=CARD2, corner_radius=10)
+        self.preset_img.grid(row=0, column=1, rowspan=2, padx=(10, 6))
+        sw = ctk.CTkFrame(style, fg_color="transparent")
+        sw.grid(row=0, column=2, sticky="w", padx=(8, 0))
+        self.color = self.cfg.get("cap_color", "")
         self.swatches = {}
         for i, c in enumerate(COLORS):
-            b = ctk.CTkButton(style, text="", width=28, height=28, corner_radius=14, fg_color=f"#{c}",
-                              hover_color=f"#{c}", border_width=3, command=lambda c=c: self._pick_color(c))
-            b.grid(row=0, column=i, padx=(0, 8))
+            b = ctk.CTkButton(sw, text="A" if not c else "", width=26, height=26, corner_radius=13,
+                              fg_color=f"#{c}" if c else CARD2, hover_color=f"#{c}" if c else BORDER,
+                              text_color=TEXT, font=self.font(11, "bold"), border_width=3,
+                              command=lambda c=c: self._pick_color(c))
+            b.grid(row=0, column=i, padx=(0, 6))
             self.swatches[c] = b
         self._pick_color(self.color)
-        self.cap = self._switch(style, "Phụ đề", self.cfg.get("captions", True), 6)
-        self.upper = self._switch(style, "IN HOA", self.cfg.get("uppercase", True), 7)
-        self.hook = self._switch(style, "Tiêu đề hook", self.cfg.get("hook", True), 8)
+        sws = ctk.CTkFrame(style, fg_color="transparent")
+        sws.grid(row=1, column=2, sticky="w", padx=(0, 0), pady=(6, 0))
+        self.cap = self._switch(sws, "Phụ đề", self.cfg.get("captions", True), 6)
+        self.hook = self._switch(sws, "Tiêu đề hook", self.cfg.get("hook", True), 7)
+        self._preset_preview()
+
         fxbox = ctk.CTkFrame(opt, fg_color="transparent")
-        self.zoomfx = self.seg(fxbox, ZOOMFX, self.cfg.get("zoom_fx", "medium"))
-        self.zoomfx.grid(row=0, column=0, sticky="w")
-        self.muted(fxbox, "Tự nghe nhạc: zoom giật vào điểm nhấn (tiếng nổ, trống), nhấp theo beat, "
-                          "đẩy zoom chậm ở cảnh dài.", 12).grid(row=0, column=1, sticky="w", padx=(12, 0))
-        row(4, 0, "Zoom theo nhịp nhạc", fxbox, span=2)
+        self.jump = self._switch(fxbox, "Cắt khoảng lặng & từ đệm", self.cfg.get("jumpcut", True), 6)
+        self.emph = self._switch(fxbox, "Tô màu từ khoá", self.cfg.get("emphasis", True), 7)
+        self.pbar = self._switch(fxbox, "Thanh tiến trình", self.cfg.get("progress_bar", False), 8)
+        for i, sw_ in enumerate((self.jump, self.emph, self.pbar)):
+            sw_.grid(row=0, column=i, padx=(0, 22), sticky="w")
+        self.muted(fxbox, "Bỏ chỗ ngập ngừng, \"ừm, à\" cho nhịp nhanh; số, tiền, từ mạnh đổi màu; thanh chạy dưới đáy "
+                          "giữ người xem tới hết.", 12, wraplength=760).grid(row=1, column=0, columnspan=9, sticky="w",
+                                                                              pady=(4, 0))
+        row(4, 0, "Nhịp dựng giữ chân người xem", fxbox, span=2)
         self.hint = self.muted(opt, "", 12)
         self.hint.grid(row=12, column=0, columnspan=2, sticky="w", padx=18, pady=(2, 14))
         self._provider_hint()
@@ -364,6 +385,17 @@ class App(ResearchMixin, ctk.CTk):
         self.color = c
         for k, b in self.swatches.items():
             b.configure(border_color=TEXT if k == c else CARD)
+
+    def _preset_preview(self):
+        key = self.preset_names.get(self.preset.get(), "classic")
+        p = config.resource_path("assets", "presets", f"{key}.png")
+        try:
+            from PIL import Image
+            im = Image.open(p)
+            self._preset_ctk = ctk.CTkImage(light_image=im, dark_image=im, size=(240, 74))
+            self.preset_img.configure(image=self._preset_ctk)
+        except Exception:
+            self.preset_img.configure(image=None, text=self.preset.get())
 
     def _provider_hint(self):
         p = key_of(PROVIDERS, self.provider.get())
@@ -759,11 +791,24 @@ class App(ResearchMixin, ctk.CTk):
         dl.grid(row=2, column=0, sticky="ew", padx=36, pady=(0, 14))
         dl.grid_columnconfigure(0, weight=1)
         self.h(dl, "Tải video").grid(row=0, column=0, sticky="w", padx=20, pady=(16, 2))
-        self.muted(dl, "Khi YouTube đòi đăng nhập ('not a bot', video giới hạn tuổi), dùng phiên đăng nhập YouTube trong "
-                       "trình duyệt của bạn.\nFirefox ổn định nhất. Với Chrome/Edge hãy đóng trình duyệt trước khi tải.",
-                   12).grid(row=1, column=0, sticky="w", padx=20)
+        self.muted(dl, "Instagram, TikTok, video giới hạn tuổi hoặc khi YouTube đòi đăng nhập ('not a bot'): app dùng phiên "
+                       "đăng nhập trong trình duyệt của bạn.\nChọn trình duyệt bạn đã đăng nhập các trang đó (Firefox ổn "
+                       "định nhất; với Chrome/Edge hãy đóng trình duyệt trước khi tải). Không chọn thì app tự thử các "
+                       "trình duyệt có trên máy khi trang đòi đăng nhập.", 12, wraplength=860).grid(row=1, column=0, sticky="w", padx=20)
         self.browser = self.seg(dl, BROWSERS, self.cfg.get("browser", ""), lambda _: self._save_settings())
-        self.browser.grid(row=2, column=0, sticky="w", padx=20, pady=(10, 18))
+        self.browser.grid(row=2, column=0, sticky="w", padx=20, pady=(10, 6))
+        ck = ctk.CTkFrame(dl, fg_color="transparent")
+        ck.grid(row=3, column=0, sticky="ew", padx=20, pady=(4, 18))
+        ck.grid_columnconfigure(1, weight=1)
+        self.muted(ck, "Hoặc file cookies.txt", 13).grid(row=0, column=0, sticky="w", padx=(0, 10))
+        self.cookies = ctk.CTkEntry(ck, height=34, corner_radius=10, border_width=0, fg_color=CARD2, font=self.font(12),
+                                    text_color=TEXT, placeholder_text="Xuất bằng tiện ích 'Get cookies.txt LOCALLY' khi "
+                                                                      "đang đăng nhập Instagram/TikTok",
+                                    placeholder_text_color=MUTED)
+        if self.cfg.get("cookies_file"):
+            self.cookies.insert(0, self.cfg["cookies_file"])
+        self.cookies.grid(row=0, column=1, sticky="ew")
+        self.button(ck, "Chọn...", self._pick_cookies, width=80, height=34).grid(row=0, column=2, padx=(8, 0))
 
         gen = self.card(page)
         gen.grid(row=3, column=0, sticky="ew", padx=36, pady=(0, 30))
@@ -777,15 +822,32 @@ class App(ResearchMixin, ctk.CTk):
         self.whisper = self.seg(gen, [("small", "Nhanh"), ("medium", "Cân bằng"), ("large-v3", "Chính xác nhất")],
                                 self.cfg.get("whisper_model", "small"), lambda _: self._save_settings())
         self.whisper.grid(row=2, column=1, sticky="w", pady=6)
-        self.muted(gen, "Xuất video", 13).grid(row=4, column=0, sticky="w", padx=20, pady=(6, 18))
+        self.muted(gen, "Xuất video", 13).grid(row=4, column=0, sticky="w", padx=20, pady=(6, 12))
         self.encoder = self.seg(gen, ENCODERS, self.cfg.get("encoder", "auto"), lambda _: self._save_settings())
-        self.encoder.grid(row=4, column=1, sticky="w", pady=(6, 18))
+        self.encoder.grid(row=4, column=1, sticky="w", pady=(6, 12))
         self.muted(gen, "Lưu clip vào", 13).grid(row=3, column=0, sticky="w", padx=20, pady=6)
         self.outdir = ctk.CTkEntry(gen, height=36, corner_radius=10, border_width=0, fg_color=CARD2, font=self.font(13),
                                    text_color=TEXT)
         self.outdir.insert(0, self.cfg["output_dir"])
         self.outdir.grid(row=3, column=1, sticky="ew", pady=6)
         self.button(gen, "Đổi...", self._pick_out, width=80, height=36).grid(row=3, column=2, padx=20, pady=6)
+        self.muted(gen, "AI chọn khung hình", 13).grid(row=5, column=0, sticky="w", padx=20, pady=(0, 18))
+        aif = ctk.CTkFrame(gen, fg_color="transparent")
+        aif.grid(row=5, column=1, columnspan=2, sticky="w", pady=(0, 18))
+        self.aiframe = ctk.CTkSwitch(aif, text="", progress_color=ACCENT, button_color=TEXT, button_hover_color=TEXT,
+                                     fg_color=BORDER, width=46, command=self._save_settings)
+        (self.aiframe.select if self.cfg.get("ai_framing", True) else self.aiframe.deselect)()
+        self.aiframe.grid(row=0, column=0)
+        self.muted(aif, "Khi dùng Claude/ChatGPT/Gemini/API: AI xem ảnh từng cảnh để bám mặt người nói, biểu cảm "
+                        "hoặc hành động (thêm 1 ảnh mỗi clip vào lượt gọi AI).", 12, wraplength=620).grid(row=0, column=1, sticky="w", padx=(8, 0))
+
+    def _pick_cookies(self):
+        from tkinter import filedialog
+        p = filedialog.askopenfilename(title="Chọn file cookies.txt", filetypes=[("cookies.txt", "*.txt"), ("Tất cả", "*.*")])
+        if p:
+            self.cookies.delete(0, "end")
+            self.cookies.insert(0, p)
+            self._save_settings()
 
     def _set_base(self, url):
         self.base_url.delete(0, "end")
@@ -805,6 +867,8 @@ class App(ResearchMixin, ctk.CTk):
         self.cfg["whisper_model"] = key_of([("small", "Nhanh"), ("medium", "Cân bằng"),
                                             ("large-v3", "Chính xác nhất")], self.whisper.get())
         self.cfg["output_dir"] = self.outdir.get().strip() or config.default_output_dir()
+        self.cfg["cookies_file"] = self.cookies.get().strip().strip('"')
+        self.cfg["ai_framing"] = bool(self.aiframe.get())
         config.save(self.cfg)
         self._provider_hint()
 
@@ -846,10 +910,11 @@ class App(ResearchMixin, ctk.CTk):
         c["num_clips"] = self._num_value()
         c["length"] = key_of(LENGTHS, self.length.get())
         c["framing"] = key_of(FRAMINGS, self.framing.get())
-        c["zoom_fx"] = key_of(ZOOMFX, self.zoomfx.get())
         c["topic"] = self.topic.get().strip()
-        c["highlight"] = self.color
-        c["captions"], c["uppercase"], c["hook"] = bool(self.cap.get()), bool(self.upper.get()), bool(self.hook.get())
+        c["cap_color"] = self.color
+        c["caption_preset"] = self.preset_names.get(self.preset.get(), "classic")
+        c["captions"], c["hook"] = bool(self.cap.get()), bool(self.hook.get())
+        c["jumpcut"], c["emphasis"], c["progress_bar"] = bool(self.jump.get()), bool(self.emph.get()), bool(self.pbar.get())
         config.save(c)
         return c
 

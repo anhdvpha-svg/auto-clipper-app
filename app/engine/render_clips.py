@@ -87,13 +87,90 @@ def chunk_words(words, max_words, max_chars=22, max_gap=0.6):
     return chunks
 
 
-def build_ass(words, W, H, max_words, highlight_rrggbb, uppercase, size=1.0, y=0.75, chunks=None):
-    """Word-highlighted captions. `chunks` (edited by the user: [{"s","e","text"}] in clip time) replaces the
-    automatic grouping; their words get times spread over the chunk in proportion to word length."""
-    rr, gg, bb = highlight_rrggbb[0:2], highlight_rrggbb[2:4], highlight_rrggbb[4:6]
-    hl = f"&H00{bb}{gg}{rr}&".upper()
-    fs = int(W * 0.072 * size)
+# ---------- caption typography presets (trendy short-video styles) ----------
+# font = family name inside the bundled font files; bord = outline as a fraction of the font size;
+# mode: color (active word recoloured) | box (active word on a coloured pill) | size (active word bigger)
+#       | karaoke (colour sweeps through the words) ; anim: pop (line pops in) | bounce (each word) | none
+CAPTION_PRESETS = {
+    "classic":  {"label": "Cổ điển vàng", "font": "Inter", "bold": 1, "color": "FFFFFF", "hl": "FFE600",
+                 "outline": "000000", "bord": 0.085, "shadow": 2, "upper": True, "mode": "color", "anim": "pop"},
+    "hormozi":  {"label": "Hormozi", "font": "Anton", "color": "FFFFFF", "hl": "FFE600", "hl2": "39E75F",
+                 "outline": "000000", "bord": 0.12, "shadow": 3, "upper": True, "mode": "color", "anim": "pop",
+                 "size": 1.2, "words": 3},
+    "beast":    {"label": "MrBeast", "font": "Bangers", "color": "FFFFFF", "hl": "FFE600", "hl2": "FF3355",
+                 "outline": "000000", "bord": 0.14, "shadow": 5, "upper": True, "mode": "color", "anim": "bounce",
+                 "size": 1.28, "spacing": 2, "words": 3},
+    "box":      {"label": "Hộp màu", "font": "Be Vietnam Pro ExtraBold", "color": "FFFFFF", "hl": "8B5CF6",
+                 "ink": "FFFFFF", "outline": "000000", "bord": 0.07, "shadow": 1, "upper": False, "mode": "box",
+                 "anim": "pop", "size": 0.98},
+    "neon":     {"label": "Neon", "font": "Paytone One", "color": "FFFFFF", "hl": "00F0FF", "outline": "FF00C8",
+                 "bord": 0.05, "shadow": 0, "blur": 4, "upper": True, "mode": "color", "anim": "pop", "size": 1.05},
+    "karaoke":  {"label": "Karaoke", "font": "Be Vietnam Pro Black", "color": "FFFFFF", "hl": "FFE600",
+                 "outline": "000000", "bord": 0.09, "shadow": 2, "upper": True, "mode": "karaoke", "anim": "none",
+                 "size": 1.0, "words": 5},
+    "oneword":  {"label": "Từng chữ", "font": "Anton", "color": "FFFFFF", "hl": "FFE600", "outline": "000000",
+                 "bord": 0.12, "shadow": 4, "upper": True, "mode": "color", "anim": "bounce", "size": 1.6, "words": 1},
+    "minimal":  {"label": "Tối giản", "font": "Be Vietnam Pro ExtraBold", "color": "FFFFFF", "hl": "FFFFFF",
+                 "outline": "000000", "bord": 0.0, "shadow": 3, "upper": False, "mode": "size", "anim": "none",
+                 "size": 0.86, "words": 6},
+    "subtitle": {"label": "Nền đen", "font": "Inter", "bold": 1, "color": "FFFFFF", "hl": "FFE600",
+                 "outline": "000000", "back": "000000", "boxed": True, "bord": 0.22, "shadow": 0, "upper": False,
+                 "mode": "color", "anim": "none", "size": 0.86, "words": 6},
+    "handwrite": {"label": "Viết tay", "font": "Patrick Hand", "color": "FFFFFF", "hl": "FFB020",
+                  "outline": "1A1A1A", "bord": 0.09, "shadow": 2, "upper": False, "mode": "color", "anim": "bounce",
+                  "size": 1.18},
+}
+
+# fonts the hook card can use: label -> file in the bundled fonts folder
+HOOK_FONTS = {"Inter": "Inter-ExtraBold.otf", "Anton": "Anton-Regular.ttf", "Bangers": "Bangers-Regular.ttf",
+              "Be Vietnam Pro": "BeVietnamPro-Black.ttf", "Paytone One": "PaytoneOne-Regular.ttf",
+              "Patrick Hand": "PatrickHand-Regular.ttf"}
+
+_EMPH = re.compile(r"^[\W_]*(\$?\d[\d.,:%]*\w{0,3}%?|[A-ZĐ][A-ZĐ0-9]{2,})[\W_]*$")
+POWER_WORDS = {
+    # vi (single syllables, so only ones that rarely appear outside a strong phrase)
+    "tiền", "triệu", "tỷ", "miễn", "phí", "bí", "mật", "sốc", "giàu", "nghèo", "đỉnh", "khủng",
+    # en
+    "money", "million", "billion", "free", "secret", "never", "always", "best", "worst", "stop", "mistake",
+    "insane", "crazy", "huge", "biggest", "truth", "rich", "broke",
+}
+
+
+def is_emphasis(word):
+    """Numbers, money, ALL-CAPS and a short list of power words get a second colour: the eye lands on them."""
+    w = word.strip()
+    if _EMPH.match(w):
+        return True
+    return re.sub(r"[^\w]", "", w.lower()) in POWER_WORDS
+
+
+def _ass_col(rrggbb, alpha=0):
+    rrggbb = (rrggbb or "FFFFFF").lstrip("#")
+    return f"&H{alpha:02X}{rrggbb[4:6]}{rrggbb[2:4]}{rrggbb[0:2]}&".upper()
+
+
+def caption_preset(name):
+    p = dict(CAPTION_PRESETS["classic"])
+    p.update(CAPTION_PRESETS.get(name or "classic", {}))
+    return p
+
+
+def build_ass(words, W, H, max_words, highlight_rrggbb, uppercase, size=1.0, y=0.75, chunks=None,
+              preset="classic", emphasis=False):
+    """Word-highlighted captions in one of the CAPTION_PRESETS. `chunks` (edited by the user: [{"s","e","text"}]
+    in clip time) replace the automatic grouping; their words get times spread over the chunk by word length.
+    highlight_rrggbb / uppercase None -> the preset's own."""
+    P = caption_preset(preset)
+    hl_hex = (highlight_rrggbb or P["hl"]).lstrip("#")
+    hl, base = _ass_col(hl_hex), _ass_col(P["color"])
+    hl2 = _ass_col(P.get("hl2") or ("FFE600" if hl_hex.upper() != "FFE600" else "39E75F"))
+    upper = P["upper"] if uppercase is None else uppercase
+    fs = int(W * 0.072 * size * P.get("size", 1.0))
+    bord = max(0, round(fs * P["bord"])) if not P.get("boxed") else max(6, round(fs * P["bord"]))
     margin_v = int(H * (1 - y))  # y = vertical position of the caption baseline (0 top .. 1 bottom)
+    style_border = 3 if P.get("boxed") else 1
+    outline_col = _ass_col(P.get("back") or P["outline"])  # boxed: opaque, or overlapping glyph boxes show seams
+    primary, secondary = (hl, base) if P["mode"] == "karaoke" else (base, base)
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {W}
@@ -103,11 +180,12 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Cap,Inter,{fs},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,{max(3, fs // 12)},2,2,60,60,{margin_v},1
+Style: Cap,{P["font"]},{fs},{primary},{secondary},{outline_col},&H80000000,{-1 if P.get("bold") else 0},0,0,0,100,100,{P.get("spacing", 0)},0,{style_border},{bord},{P["shadow"]},2,60,60,{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
+    max_words = P.get("words", max_words) if max_words == 4 else max_words
     if chunks is not None:
         groups = []
         for c in chunks:
@@ -122,19 +200,50 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 cur += d
             groups.append(g)
     else:
-        groups = chunk_words(words, max_words)
+        groups = chunk_words(words, max_words, max_chars=22 if max_words <= 4 else 34)
+    blur = f"{{\\blur{P['blur']}}}" if P.get("blur") else ""
+    ink = _ass_col(P.get("ink", "000000"))
     lines = []
     for ci, ch in enumerate(groups):
         next_start = groups[ci + 1][0]["s"] if ci + 1 < len(groups) else ch[-1]["e"] + 0.5
-        texts = [ass_escape(w["w"].upper() if uppercase else w["w"]) for w in ch]
+        texts = [ass_escape(w["w"].upper() if upper else w["w"]) for w in ch]
+        emph = [emphasis and is_emphasis(w["w"]) for w in ch]
+        line_end = min(next_start, ch[-1]["e"] + 0.4)
+        if P["mode"] == "karaoke":
+            ks = []
+            for i, w in enumerate(ch):
+                nxt = ch[i + 1]["s"] if i + 1 < len(ch) else w["e"]
+                ks.append(f"{{\\kf{max(1, int(round((nxt - w['s']) * 100)))}}}{texts[i]}")
+            lines.append(f"Dialogue: 0,{ass_time(ch[0]['s'])},{ass_time(line_end)},Cap,,0,0,0,,{blur}" + " ".join(ks))
+            continue
         for i, w in enumerate(ch):
             st = w["s"]
-            en = ch[i + 1]["s"] if i + 1 < len(ch) else min(next_start, w["e"] + 0.4)
+            en = ch[i + 1]["s"] if i + 1 < len(ch) else line_end
             if en <= st:
                 en = st + 0.05
-            parts = [(f"{{\\c{hl}}}{t}{{\\c&H00FFFFFF&}}" if j == i else t) for j, t in enumerate(texts)]
-            pop = "{\\fscx108\\fscy108\\t(0,90,\\fscx100\\fscy100)}" if i == 0 else ""
-            lines.append(f"Dialogue: 0,{ass_time(st)},{ass_time(en)},Cap,,0,0,0,,{pop}{' '.join(parts)}")
+            parts = []
+            for j, t in enumerate(texts):
+                rest = f"{{\\c{base}}}"
+                if j == i:
+                    if P["mode"] == "box":
+                        on = f"{{\\c{ink}\\3c{hl}\\bord{max(8, fs // 5)}\\shad0}}"
+                        rest = f"{{\\c{base}\\3c{outline_col}\\bord{bord}\\shad{P['shadow']}}}"
+                    elif P["mode"] == "size":
+                        on = "{\\fscx112\\fscy112}"
+                        rest = "{\\fscx100\\fscy100}"
+                    else:
+                        on = f"{{\\c{hl}}}"
+                    if P["anim"] == "bounce":
+                        on = on[:-1] + "\\fscx125\\fscy125\\t(0,110,\\fscx100\\fscy100)}" if P["mode"] != "size" else \
+                            "{\\fscx125\\fscy125\\t(0,110,\\fscx112\\fscy112)}"
+                        rest = rest[:-1] + "\\fscx100\\fscy100}"
+                    parts.append(f"{on}{t}{rest}")
+                elif emph[j]:
+                    parts.append(f"{{\\c{hl2}}}{t}{{\\c{base}}}")
+                else:
+                    parts.append(t)
+            pop = "{\\fscx86\\fscy86\\t(0,90,\\fscx100\\fscy100)}" if i == 0 and P["anim"] == "pop" else ""
+            lines.append(f"Dialogue: 0,{ass_time(st)},{ass_time(en)},Cap,,0,0,0,,{blur}{pop}{' '.join(parts)}")
     return header + "\n".join(lines) + "\n"
 
 
@@ -152,12 +261,13 @@ def fonts_dir():
     return os.environ.get("AUTOCLIPPER_FONTS")  # read at call time: the desktop app sets it after import
 
 
-def find_font(*names):
+def find_font(*names, font="Inter"):
     fd = fonts_dir()
     if fd:
-        p = os.path.join(fd, "Inter-ExtraBold.otf")
-        if os.path.exists(p):
-            return p
+        for fn in (HOOK_FONTS.get(font, ""), "Inter-ExtraBold.otf"):
+            p = os.path.join(fd, fn) if fn else ""
+            if p and os.path.exists(p):
+                return p
     for n in names:
         try:
             r = subprocess.run(["fc-match", "-f", "%{file}", n], capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -172,16 +282,33 @@ def find_font(*names):
     return None
 
 
-HOOK_THEMES = {"light": ((255, 255, 255, 255), (0, 0, 0, 255)),     # white box, black text (OpusClip default)
-               "dark": ((0, 0, 0, 235), (255, 255, 255, 255)),
-               "accent": (None, (0, 0, 0, 255))}                  # box in the highlight colour
+# box colour, text colour, text outline colour (None = no outline)
+HOOK_THEMES = {"light": ((255, 255, 255, 255), (0, 0, 0, 255), None),    # white box, black text (OpusClip default)
+               "dark": ((0, 0, 0, 235), (255, 255, 255, 255), None),
+               "accent": (None, (0, 0, 0, 255), None),                  # box in the highlight colour
+               "red": ((230, 33, 41, 255), (255, 255, 255, 255), None),  # YouTube-red banner
+               "outline": ((0, 0, 0, 0), (255, 255, 255, 255), (0, 0, 0, 255)),   # no box, white with black stroke
+               "yellow": ((0, 0, 0, 0), (255, 230, 0, 255), (0, 0, 0, 255)),      # no box, yellow with black stroke
+               "glass": ((20, 20, 20, 150), (255, 255, 255, 255), None)}           # translucent dark box
+
+HOOK_THEME_LABELS = {"light": "Hộp trắng", "dark": "Hộp đen", "accent": "Hộp màu nhấn", "red": "Băng đỏ",
+                     "outline": "Chữ viền đen", "yellow": "Chữ vàng viền", "glass": "Kính mờ"}
 
 
-def make_hook_png(text, W, path, uppercase=True, size=1.0, theme="light", accent="FFE600"):
+def hook_y(style, box_h, H):
+    """Top of the hook card: a dragged position (fraction of the height) wins over the named spots."""
+    if style.get("y") is not None:
+        return int(max(0, min(H - box_h, float(style["y"]) * H)))
+    pos = style.get("position", "top")
+    return {"top": int(H * 0.06), "middle": int((H - box_h) / 2), "bottom": int(H * 0.60 - box_h)}.get(pos, int(H * 0.06))
+
+
+def make_hook_png(text, W, path, uppercase=True, size=1.0, theme="light", accent="FFE600", font="Inter"):
     """Line breaks typed by the user are kept; long lines are wrapped to ~3/4 of the frame width."""
     from PIL import Image, ImageDraw, ImageFont
-    font_path = find_font("Inter:style=ExtraBold", "Montserrat:style=ExtraBold", "DejaVu Sans:style=Bold")
-    fs = max(20, int(W * 0.062 * size))
+    font_path = find_font("Inter:style=ExtraBold", "Montserrat:style=ExtraBold", "DejaVu Sans:style=Bold", font=font)
+    scale = {"Anton": 1.12, "Bangers": 1.18, "Patrick Hand": 1.15}.get(font, 1.0)
+    fs = max(20, int(W * 0.062 * size * scale))
     if font_path:
         font = ImageFont.truetype(font_path, fs)
     else:
@@ -213,15 +340,17 @@ def make_hook_png(text, W, path, uppercase=True, size=1.0, theme="light", accent
     tw = max(int(d.textlength(l, font=font)) for l in lines)
     px, py = int(fs * 0.62), int(fs * 0.42)
     bw, bh = tw + 2 * px, lh * len(lines) + 2 * py
-    box, ink = HOOK_THEMES.get(theme, HOOK_THEMES["light"])
+    box, ink, stroke = HOOK_THEMES.get(theme, HOOK_THEMES["light"])
     if box is None:
         box = tuple(int(accent[i:i + 2], 16) for i in (0, 2, 4)) + (255,)
+    sw = max(3, fs // 9) if stroke else 0
     img = Image.new("RGBA", (bw, bh), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    d.rounded_rectangle([0, 0, bw - 1, bh - 1], radius=int(fs * 0.32), fill=box)
+    if box[3]:
+        d.rounded_rectangle([0, 0, bw - 1, bh - 1], radius=int(fs * 0.32), fill=box)
     for i, l in enumerate(lines):
         lw = d.textlength(l, font=font)
-        d.text(((bw - lw) / 2, py + i * lh), l, font=font, fill=ink)
+        d.text(((bw - lw) / 2, py + i * lh), l, font=font, fill=ink, stroke_width=sw, stroke_fill=stroke)
     img.save(path)
     return True
 
@@ -229,7 +358,8 @@ def make_hook_png(text, W, path, uppercase=True, size=1.0, theme="light", accent
 # ---------- framing ----------
 
 def plan_segments(ranges, clip, default_mode, shots):
-    """Split the clip's ranges at shot cuts and give each piece a layout and crop_x.
+    """Split the clip's ranges at shot cuts and give each piece a layout and a crop:
+    (start, end, layout, crop_x, extra) with extra = {"zoom", "crop_y", "track"} for face punch-ins and pans.
     Pieces always cover each range end to end (gaps take the neighbouring shot's framing)."""
     mode = clip.get("reframe", default_mode)
     overrides = clip.get("layout_overrides") or []
@@ -262,53 +392,114 @@ def plan_segments(ranges, clip, default_mode, shots):
             lay = "fit" if mode == "blur" else "fill"
             pieces = [[s, e, lay, float(clip.get("crop_x", 0.5)), None]]
         for p in pieces:
-            for o in overrides:  # {"at": source_seconds, "layout": "fit"|"fill", "crop_x": 0.4}
+            sh = p[4] or {}
+            extra = {"zoom": float(sh.get("zoom") or 1.0), "crop_y": float(sh.get("crop_y", 0.5)),
+                     "track": sh.get("track")}
+            for o in overrides:  # {"at": source_seconds, "layout": "fit"|"fill", "crop_x": 0.4, "zoom": 1.2}
                 if p[0] <= o["at"] < p[1] or (p[4] and p[4]["start"] <= o["at"] < p[4]["end"]):
                     p[2] = o.get("layout", p[2])
-                    p[3] = float(o.get("crop_x", p[3]))
+                    if "crop_x" in o:
+                        p[3] = float(o["crop_x"])
+                        extra["track"] = None  # placed by hand: hold still
+                    if "zoom" in o:
+                        extra["zoom"] = float(o["zoom"])
+                    if "crop_y" in o:
+                        extra["crop_y"] = float(o["crop_y"])
             if mode != "auto" and "crop_x" in clip:
                 p[3] = float(clip["crop_x"])
-            segs.append((p[0], p[1], p[2], p[3]))
+            segs.append((p[0], p[1], p[2], p[3], extra))
     return segs
+
+
+def crop_geometry(aw, ah, W, H, zoom=1.0):
+    """Size of the source window that fills the W x H output at this zoom."""
+    target_ar = W / H
+    z = max(1.0, zoom or 1.0)
+    cw = int(ah * target_ar / z) // 2 * 2
+    ch = int(ah / z) // 2 * 2
+    return cw, ch
+
+
+def crop_xy(cx, cy, cw, ch, aw, ah):
+    """Top-left of the crop window for a subject at (cx, cy) (fractions): centred across, and the face a bit
+    above the middle (40% from the top) when zoomed in, the way a camera operator frames a close-up."""
+    x = int(max(0, min(aw - cw, cx * aw - cw / 2)))
+    y = int(max(0, min(ah - ch, cy * ah - ch * 0.4))) if ch < ah else 0
+    return x, y
+
+
+def _piecewise(items, default):
+    """items [(a, b, expr)] in stream time -> one ffmpeg expression."""
+    out = str(default)
+    for a0, b0, ex in reversed(items):
+        out = f"if(between(t,{a0:.3f},{b0:.3f}),{ex},{out})"
+    return out
+
+
+def _x_expr(piece, cw, ch, aw, ah, rs):
+    """Crop x for one piece: fixed, or a smooth pan along the tracked face keyframes."""
+    a0, b0, _, cx, ex = piece
+    x0, _ = crop_xy(cx, ex.get("crop_y", 0.5), cw, ch, aw, ah)
+    tr = ex.get("track")
+    if not tr:
+        return str(x0)
+    pts = [(t - rs, crop_xy(x, 0.5, cw, ch, aw, ah)[0]) for t, x in tr]
+    pts = [(max(a0, min(b0, t)), x) for t, x in pts]
+    pts.sort()
+    expr = str(pts[-1][1])
+    for (t1, x1), (t2, x2) in reversed(list(zip(pts, pts[1:]))):
+        if t2 - t1 < 0.05:
+            continue
+        # ease in-out between keyframes: no jerky linear starts
+        k = f"(1-cos(PI*(t-{t1:.3f})/{t2 - t1:.3f}))/2"
+        expr = f"if(lt(t,{t2:.3f}),{x1}+({x2 - x1})*{k},{expr})"
+    return f"if(lt(t,{pts[0][0]:.3f}),{pts[0][1]},{expr})"
 
 
 def range_chain(k, s, e, pieces, seek, actcrop, act, W, H, fps):
     """One continuous stream per range; the framing switches at shot cuts inside the stream
-    (time-based crop + overlay enable), so there are no joins to stutter."""
+    (time-based crop + overlay enable), so there are no joins to stutter. Fill pieces are grouped by zoom
+    level (crop size is fixed per filter), each group is one crop branch with per-time x/y."""
     aw, ah = act["w"], act["h"]
     src_ar, target_ar = aw / ah, W / H
     head = f"[0:v]trim=start={s - seek:.3f}:end={e - seek:.3f},setpts=PTS-STARTPTS,{actcrop}fps={fps},format=yuv420p"
-    rel = [(ps - s, pe - s, lay, cx) for ps, pe, lay, cx in pieces]
+    rel = [(ps - s, pe - s, lay, cx, ex) for ps, pe, lay, cx, ex in pieces]
     if src_ar <= target_ar + 0.01:  # already vertical: just fill
         return f"{head},scale={W}:-2,crop={W}:{H},setsar=1[v{k}]"
-    cw = int(ah * target_ar) // 2 * 2
 
-    def x_of(cx):
-        return int(max(0, min(aw - cw, cx * aw - cw / 2)))
     fills = [r for r in rel if r[2] != "fit"]
     fits = [r for r in rel if r[2] == "fit"]
-    if fills:
-        xs = {x_of(r[3]) for r in fills}
-        if len(xs) == 1:
-            xexpr = str(xs.pop())
-        else:
-            xexpr = str(x_of(fills[-1][3]))
-            for a0, b0, _, cx in reversed(fills[:-1]):
-                xexpr = f"if(between(t,{a0:.3f},{b0:.3f}),{x_of(cx)},{xexpr})"
-            xexpr = f"'{xexpr}'"
-        fill = f"crop={cw}:{ah}:{xexpr}:0,scale={W}:{H},setsar=1"
+    groups = {}
+    for r in fills:
+        z = round(max(1.0, r[4].get("zoom", 1.0)), 2) if src_ar > target_ar * 1.2 else 1.0
+        groups.setdefault(z, []).append(r)
+    branches = []  # (filter chain, pieces it shows)
+    for z, rs_ in sorted(groups.items()):
+        cw, ch = crop_geometry(aw, ah, W, H, z)
+        xs = [(a0, b0, _x_expr(r, cw, ch, aw, ah, s)) for r in rs_ for a0, b0 in [(r[0], r[1])]]
+        ys = [(r[0], r[1], str(crop_xy(r[3], r[4].get("crop_y", 0.5), cw, ch, aw, ah)[1])) for r in rs_]
+        xexpr = xs[0][2] if len({x[2] for x in xs}) == 1 else _piecewise(xs[:-1], xs[-1][2])
+        yexpr = ys[0][2] if len({y[2] for y in ys}) == 1 else _piecewise(ys[:-1], ys[-1][2])
+        q = lambda ex: ex if ex.lstrip("-").isdigit() else f"'{ex}'"
+        branches.append((f"crop={cw}:{ch}:{q(xexpr)}:{q(yexpr)},scale={W}:{H},setsar=1", rs_))
     bw, bh = W // 4 // 2 * 2, H // 4 // 2 * 2
     fit_bg = (f"scale={bw}:{bh}:force_original_aspect_ratio=increase,crop={bw}:{bh},boxblur=8:2,"
               f"scale={W}:{H}:flags=bilinear,eq=brightness=-0.08")
-    if not fits:
-        return f"{head},{fill}[v{k}]"
-    fit = (f"split[fa{k}][fb{k}];[fa{k}]{fit_bg}[bg{k}];[fb{k}]scale={W}:-2[fg{k}];"
-           f"[bg{k}][fg{k}]overlay=(W-w)/2:(H-h)/2,setsar=1")
-    if not fills:
-        return f"{head},{fit}[v{k}]"
-    enable = "+".join(f"between(t,{a0:.3f},{b0 - 0.001:.3f})" for a0, b0, _, _ in fills)
-    return (f"{head},split[p{k}][q{k}];[p{k}]{fit}[fit{k}];[q{k}]{fill}[fill{k}];"
-            f"[fit{k}][fill{k}]overlay=0:0:enable='{enable}'[v{k}]")
+    if fits:
+        branches.insert(0, (f"split[fa{k}][fb{k}];[fa{k}]{fit_bg}[bg{k}];[fb{k}]scale={W}:-2[fg{k}];"
+                            f"[bg{k}][fg{k}]overlay=(W-w)/2:(H-h)/2,setsar=1", fits))
+    if len(branches) == 1:
+        return f"{head},{branches[0][0]}[v{k}]"
+    n = len(branches)
+    out = f"{head},split={n}" + "".join(f"[s{k}_{i}]" for i in range(n)) + ";"
+    out += ";".join(f"[s{k}_{i}]{chain}[b{k}_{i}]" for i, (chain, _) in enumerate(branches)) + ";"
+    last = f"[b{k}_0]"
+    for i in range(1, n):
+        enable = "+".join(f"between(t,{a0:.3f},{b0 - 0.001:.3f})" for a0, b0, *_ in branches[i][1])
+        nxt = f"[v{k}]" if i == n - 1 else f"[o{k}_{i}]"
+        out += f"{last}[b{k}_{i}]overlay=0:0:enable='{enable}'{nxt}" + (";" if i < n - 1 else "")
+        last = nxt
+    return out
 
 
 def slugify(text, maxlen=40):
@@ -407,9 +598,44 @@ def pick_encoder(choice="auto"):
     return found
 
 
+FILLERS = {"ừ", "ừm", "ờ", "à", "ầ", "ơ", "ư", "hmm", "um", "uh", "uhm", "erm", "ah", "eh", "mm"}
+
+
+def jumpcut_ranges(ranges, words, min_gap=0.42, pad=0.09, min_piece=0.7, max_cuts=30):
+    """Jump cuts: drop the dead air between phrases and filler sounds ("ừm", "uh"...), the fast-paced
+    editing that keeps viewers on short-video platforms. Works on word timestamps, so cuts land between words."""
+    out = []
+    for s, e in ranges:
+        ws = [w for w in words if w["s"] >= s - 0.05 and w["e"] <= e + 0.05]
+        keep = [w for w in ws if re.sub(r"[^\w]", "", w["w"].lower()) not in FILLERS or w["e"] - w["s"] > 0.9]
+        if len(keep) < 2:
+            out.append([s, e])
+            continue
+        gaps = []
+        for w1, w2 in zip(keep, keep[1:]):
+            g = w2["s"] - w1["e"]
+            if g > min_gap:
+                gaps.append((g, w1["e"] + pad, w2["s"] - pad))
+        gaps = sorted(sorted(gaps, reverse=True)[:max_cuts], key=lambda x: x[1])
+        cur = s
+        for _, a0, b0 in gaps:
+            if b0 - a0 < 0.15 or a0 - cur < min_piece:
+                continue
+            out.append([cur, a0])
+            cur = b0
+        if out and e - cur < min_piece and out[-1][0] >= s:  # tiny tail: join to the previous piece
+            cur = out.pop()[0]
+        out.append([cur, e])
+    return [[round(x, 3), round(y, 3)] for x, y in out]
+
+
 def render_clip(idx, clip, a, src, words, duration, shots, act):
     W, H = a.W, a.H
     ranges = clip_ranges(clip, words, duration)
+    base_ranges = ranges
+    jumpcut = clip.get("jumpcut", a.jumpcut)
+    if jumpcut and words:
+        ranges = jumpcut_ranges(ranges, words)
     seek = max(0.0, min(s for s, _ in ranges) - 1.0)  # input-seek near the clip, then trim precisely
     clip_words, total = clip_words_of(ranges, words)
 
@@ -425,7 +651,7 @@ def render_clip(idx, clip, a, src, words, duration, shots, act):
     else:
         last = "[v0]"
 
-    # music-synced zoom (punch-ins on hits, beat pulses, slow push-ins) on the composed frame, before any text
+    # (legacy, off by default) music-synced zoom on the composed frame, before any text
     fx_level = clip.get("zoom_fx", a.zoom_fx)
     fx = {"level": fx_level, "events": 0}
     if fx_level != "off" and src["has_audio"]:
@@ -451,9 +677,12 @@ def render_clip(idx, clip, a, src, words, duration, shots, act):
     if show_caps:
         ass_name = f"{slug}.ass"
         with open(os.path.join(a.out_dir, ass_name), "w", encoding="utf-8") as f:
-            f.write(build_ass(clip_words, W, H, a.words_per_line, cs.get("highlight", a.highlight).lstrip("#"),
-                              cs.get("uppercase", a.uppercase), size=float(cs.get("size", 1.0)),
-                              y=float(cs.get("y", 0.75)), chunks=chunks))
+            preset = cs.get("preset", a.caption_preset)
+            hl = cs.get("highlight") or (a.highlight if a.highlight_set else None)   # None: the preset's colour
+            up = cs.get("uppercase", a.uppercase if a.uppercase_set else None)
+            f.write(build_ass(clip_words, W, H, a.words_per_line, hl.lstrip("#") if hl else None, up,
+                              size=float(cs.get("size", 1.0)), y=float(cs.get("y", 0.75)), chunks=chunks,
+                              preset=preset, emphasis=cs.get("emphasis", a.emphasis)))
         fontsdir = ""
         fd = fonts_dir()
         if fd and os.path.isdir(fd):
@@ -476,16 +705,24 @@ def render_clip(idx, clip, a, src, words, duration, shots, act):
         png = f"{slug}_hook.png"
         if make_hook_png(hook, W, os.path.join(a.out_dir, png), uppercase=hs_style.get("uppercase", True),
                          size=float(hs_style.get("size", 1.0)), theme=hs_style.get("theme", "light"),
-                         accent=a.highlight):
+                         accent=a.highlight, font=hs_style.get("font", "Inter")):
             from PIL import Image
             bh = Image.open(os.path.join(a.out_dir, png)).height
-            pos = hs_style.get("position", "top")
-            y = {"top": int(H * 0.06), "middle": int((H - bh) / 2), "bottom": int(H * 0.60 - bh)}.get(pos, int(H * 0.06))
+            y = hook_y(hs_style, bh, H)
             extra_inputs = ["-loop", "1", "-t", f"{hs:.2f}", "-i", png]
             fade_out = f",fade=out:st={max(0, hs - 0.3):.2f}:d=0.3:alpha=1" if hs < total - 0.05 else ""
             parts.append(f"[1:v]format=rgba,fade=in:st=0:d=0.25:alpha=1{fade_out}[ttl]")
             parts.append(f"{last}[ttl]overlay=(W-w)/2:{y}:eof_action=pass[vh]")
             last = "[vh]"
+
+    if clip.get("progress_bar", a.progress_bar) and total > 3:
+        # thin bar filling left to right: viewers see how much is left and stay to the end
+        bar_h = max(6, H // 160)
+        col = (cs.get("highlight") or (a.highlight if a.highlight_set else
+                                       caption_preset(cs.get("preset", a.caption_preset))["hl"])).lstrip("#")
+        parts.append(f"color=c=0x{col}:s={W}x{bar_h}:r={a.fps}:d={total:.3f},format=rgba[pbar]")
+        parts.append(f"{last}[pbar]overlay=x='-W+W*t/{total:.3f}':y=H-{bar_h}:eof_action=pass[vpb]")
+        last = "[vpb]"
 
     if not a.no_fade and total > 2:
         parts.append(f"{last}fade=out:st={total - 0.3:.3f}:d=0.3[vf]")
@@ -494,7 +731,9 @@ def render_clip(idx, clip, a, src, words, duration, shots, act):
     amap = []
     if src["has_audio"]:
         for k, (s, e) in enumerate(ranges):
-            parts.append(f"[0:a]atrim=start={s - seek:.3f}:end={e - seek:.3f},asetpts=PTS-STARTPTS[ar{k}]")
+            edge = (f",afade=t=in:d=0.012,afade=t=out:st={max(0, e - s - 0.012):.3f}:d=0.012"
+                    if len(ranges) > 1 else "")
+            parts.append(f"[0:a]atrim=start={s - seek:.3f}:end={e - seek:.3f},asetpts=PTS-STARTPTS{edge}[ar{k}]")
         chain = "".join(f"[ar{k}]" for k in range(len(ranges))) + f"concat=n={len(ranges)}:v=0:a=1"
         aopts = clip.get("audio") or {}
         m = None
@@ -504,10 +743,11 @@ def render_clip(idx, clip, a, src, words, duration, shots, act):
         amap = ["-map", "[aout]", "-c:a", "aac", "-b:a", "192k", "-ar", "48000"]
 
     out_name = f"{slug}.mp4"
-    lays = "".join("F" if l == "fill" else "B" for _, _, l, _ in segs)
+    lays = "".join(("Z" if ex.get("zoom", 1) > 1.01 else "F") if l == "fill" else "B" for _, _, l, _, ex in segs)
     fxs = (f" fx={fx['level']}: {fx.get('bpm', 0):.0f} BPM{' music' if fx.get('music') else ''}, "
            f"{fx.get('punches', 0)} punch / {fx['events']} zoom events") if fx["level"] != "off" else ""
-    print(f"[{slug}] {total:.1f}s ranges={ranges} shots={lays} (F=fill, B=fit/blur){fxs}", file=sys.stderr)
+    jc = f" jumpcuts={len(ranges) - len(base_ranges)}" if jumpcut else ""
+    print(f"[{slug}] {total:.1f}s{jc} ranges={base_ranges} shots={lays} (F=fill, Z=fill zoomed on face, B=fit/blur){fxs}", file=sys.stderr)
     enc = pick_encoder(a.encoder)
 
     def run(enc_name):
@@ -524,7 +764,8 @@ def render_clip(idx, clip, a, src, words, duration, shots, act):
         raise RuntimeError("ffmpeg failed: " + "\n".join(r.stderr.strip().splitlines()[-4:]))
     subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", f"{min(1.0, total / 2):.2f}", "-i", out_name,
                     "-frames:v", "1", "-vf", "scale=360:-2", f"{slug}.jpg"], cwd=a.out_dir)
-    return {"file": out_name, "thumb": f"{slug}.jpg", "ranges": ranges, "length": round(total, 1),
+    return {"file": out_name, "thumb": f"{slug}.jpg", "ranges": base_ranges, "pieces": ranges,
+            "jump_cuts": len(ranges) - len(base_ranges), "length": round(total, 1),
             "words": len(clip_words), "shot_layouts": lays, "zoom_fx": fx}
 
 
@@ -584,10 +825,17 @@ def main(argv=None):
     ap.add_argument("--only", help="comma-separated 1-based clip numbers to (re)render")
     ap.add_argument("--encoder", default="auto", choices=["auto", "x264", "nvenc", "qsv", "amf"],
                     help="H.264 encoder: auto = GPU (NVIDIA/Intel/AMD) when available, else CPU x264")
-    ap.add_argument("--zoom-fx", default="medium", choices=["off", "light", "medium", "strong"],
-                    help="music-synced zoom: punch-ins on hits, beat pulses, slow push-ins (default medium)")
+    ap.add_argument("--zoom-fx", default="off", choices=["off", "light", "medium", "strong"],
+                    help="(legacy) music-synced zoom pulses; off by default")
+    ap.add_argument("--caption-preset", default="classic", choices=list(CAPTION_PRESETS),
+                    help="caption typography: " + ", ".join(CAPTION_PRESETS))
+    ap.add_argument("--emphasis", action="store_true", help="colour numbers, money and power words in captions")
+    ap.add_argument("--jumpcut", action="store_true", help="cut pauses and filler sounds between phrases")
+    ap.add_argument("--progress-bar", action="store_true", help="thin progress bar along the bottom")
     ap.add_argument("--jobs", type=int, default=0, help="clips rendered in parallel (default: 2 if >= 6 CPU cores)")
     a = ap.parse_args(argv)
+    raw = argv if argv is not None else sys.argv[1:]
+    a.highlight_set, a.uppercase_set = "--highlight" in raw, "--uppercase" in raw
     a.W, a.H = (int(x) for x in a.size.lower().split("x"))
     a.highlight = a.highlight.lstrip("#")
     os.makedirs(a.out_dir, exist_ok=True)

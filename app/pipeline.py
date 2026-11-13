@@ -178,7 +178,8 @@ class Job:
             self.dl = Downloader(self.tools["yt-dlp"], self.tools["deno"], os.path.dirname(self.tools["ffmpeg"]),
                                  log, lambda f, t: self.progress(0.05 + 0.10 * f, t), self.cancel_flag.is_set)
             try:
-                video, subs, info = self.dl.download(self.source, work, browser=cfg.get("browser") or None)
+                video, subs, info = self.dl.download(self.source, work, browser=cfg.get("browser") or None,
+                                                     cookies_file=cfg.get("cookies_file") or None)
             except DownloadError as e:
                 raise JobError(str(e))
             if subs:
@@ -343,6 +344,9 @@ class Job:
                 merged += sj["shots"]
                 active = active or sj.get("active_area")
                 self._check()
+            if provider != "offline" and cfg.get("ai_framing", True):
+                self.progress(0.6, "AI đang chọn khung hình (mặt, biểu cảm, hành động)...")
+                self._ai_framing(video, merged, active, clips, provider, log, work)
             shots_path = os.path.join(work, "shots.json")
             json.dump({"shots": merged, "active_area": active}, open(shots_path, "w"))
 
@@ -351,9 +355,16 @@ class Job:
         spec = [self._to_spec(c) for c in clips]
         clips_path = os.path.join(work, "clips.json")
         json.dump({"clips": spec}, open(clips_path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
-        argv = ["--video", video, "--clips", clips_path, "--out-dir", out,
-                "--highlight", cfg.get("highlight", "FFE600"), "--encoder", cfg.get("encoder", "auto"),
-                "--zoom-fx", cfg.get("zoom_fx", "medium")]
+        argv = ["--video", video, "--clips", clips_path, "--out-dir", out, "--encoder", cfg.get("encoder", "auto"),
+                "--caption-preset", cfg.get("caption_preset", "classic")]
+        if cfg.get("cap_color"):  # "" = the preset's own colours
+            argv += ["--highlight", cfg["cap_color"]]
+        if cfg.get("emphasis", True):
+            argv.append("--emphasis")
+        if cfg.get("jumpcut", True) and mode == "talk":  # music/visual clips keep their rhythm
+            argv.append("--jumpcut")
+        if cfg.get("progress_bar", False):
+            argv.append("--progress-bar")
         if transcript["segments"]:
             argv += ["--transcript", tjson]
         if shots_path:
@@ -362,8 +373,6 @@ class Job:
             argv += ["--reframe", "blur" if cfg.get("framing") == "blur" else "center"]
         if not cfg.get("captions", True):
             argv.append("--no-captions")
-        if cfg.get("uppercase", True):
-            argv.append("--uppercase")
         if not cfg.get("hook", True):
             argv.append("--no-hook")
         # remember how this project was rendered, so the editor can re-render single clips later
@@ -391,6 +400,51 @@ class Job:
         return {"out_dir": out, "clips": results, "work_dir": work, "note": self.count_note}
 
     # ------------------------------------------------------------------
+    def _ai_framing(self, video, shots, active, clips, provider, log, work):
+        """Let the vision model check the automatic framing: one numbered contact sheet per clip, the model says
+        fill/fit, where to point the vertical window and whether to punch in. Failures keep the automatic plan."""
+        cfg = self.cfg
+        model, key = cfg["models"].get(provider), config.get_key(cfg, provider)
+        base = (cfg.get("base_urls") or {}).get(provider)
+        if not model or not key:
+            return
+        full = render_clips.ffprobe_json(video)
+        v = next(x for x in full["streams"] if x["codec_type"] == "video")
+        act = active or {"x": 0, "y": 0, "w": int(v["width"]), "h": int(v["height"])}
+        analyze_video.ACTIVE = active if active and (act["w"], act["h"]) != (int(v["width"]), int(v["height"])) else None
+        src_ar = act["w"] / act["h"]
+        if src_ar <= 9 / 16 + 0.01:
+            return
+        changed = 0
+        for ci, c in enumerate(clips, 1):
+            inside = [sh for sh in shots if sh["end"] > c["start"] and sh["start"] < c["end"]]
+            if not inside:
+                continue
+            if len(inside) > 12:  # the longest shots matter most
+                inside = sorted(sorted(inside, key=lambda sh: -(sh["end"] - sh["start"]))[:12], key=lambda sh: sh["start"])
+            view = [dict(sh, id=k) for k, sh in enumerate(inside, 1)]
+            sheet = os.path.join(work, f"aiframe_{ci:02d}.png")
+            try:
+                analyze_video.framing_sheet(video, view, sheet, src_ar)
+                picks = llm.frame_shots(provider, model, key, sheet, [x["id"] for x in view], base=base)
+            except Exception as e:  # AIError or anything else: the automatic plan is still good
+                log(f"AI chọn khung lỗi ({e}); giữ khung tự động.")
+                return
+            for k, sh in enumerate(inside, 1):
+                p = picks.get(k)
+                if not p:
+                    continue
+                z = p["zoom"]
+                z = 1.0 if z < 1.1 else (1.2 if z < 1.3 else 1.4)
+                if abs(p["crop_x"] - sh.get("crop_x", 0.5)) > 0.05 or p["layout"] != sh["layout"]:
+                    sh["track"] = None
+                    changed += 1
+                sh.update(layout=p["layout"], crop_x=round(p["crop_x"], 3), zoom=z,
+                          reason=f"AI: {p['focus']}" if p["focus"] else "AI")
+                sh.setdefault("crop_y", 0.42)
+            self._check()
+        log(f"AI đã xem khung hình, chỉnh {changed} cảnh.")
+
     @staticmethod
     def _sidecars(video):
         """Subtitles/info saved next to a downloaded file (e.g. by the one-click downloader)."""

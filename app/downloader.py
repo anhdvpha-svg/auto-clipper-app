@@ -4,6 +4,7 @@ One yt-dlp run gets the video, its info and every subtitle track worth having; t
 afterwards from the info. Fragments download in parallel. If YouTube asks for a login, the run is repeated
 with the user's own browser session (only when the user enabled that in Settings)."""
 import glob, json, os, re, subprocess, threading, time
+from urllib.parse import urlparse
 
 STALL_SECONDS = 120          # no output for this long -> kill and retry
 PROGRESS_RE = re.compile(r"\[dl\]\s*([\d.]+)%\s*(\S+)\s+ETA\s+(\S+)")
@@ -13,32 +14,85 @@ class DownloadError(Exception):
     """Message for the user."""
 
 
-def _explain(text):
+SITES = {"instagram.com": "Instagram", "tiktok.com": "TikTok", "facebook.com": "Facebook", "fb.watch": "Facebook",
+         "youtube.com": "YouTube", "youtu.be": "YouTube", "twitch.tv": "Twitch", "kick.com": "Kick",
+         "x.com": "X (Twitter)", "twitter.com": "X (Twitter)", "threads.net": "Threads", "bilibili.com": "Bilibili",
+         "dailymotion.com": "Dailymotion", "rumble.com": "Rumble", "vimeo.com": "Vimeo"}
+
+
+def site_of(url):
+    host = (urlparse(url).hostname or "").lower()
+    for dom, name in SITES.items():
+        if host == dom or host.endswith("." + dom):
+            return name
+    return "Trang này"
+
+
+LOGIN_HINTS = ("sign in to confirm", "not a bot", "login required", "log in", "login_required", "requires login",
+               "isn't available to everyone", "can't be seen by certain audiences", "empty media response",
+               "rate-limit reached", "requested content is not available", "use --cookies", "cookies-from-browser",
+               "private account", "you need to log in", "this content isn't available", "registered users")
+
+
+def _needs_login(text):
     s = text.lower()
-    if "sign in to confirm" in s or "not a bot" in s:
-        return ("YouTube yêu cầu đăng nhập để tải video này. Vào Cài đặt → Tải video, chọn trình duyệt "
-                "bạn đang đăng nhập YouTube (Firefox ổn định nhất; với Chrome/Edge hãy đóng trình duyệt trước), rồi thử lại.")
-    if "age" in s and ("restrict" in s or "confirm your age" in s):
-        return "Video giới hạn độ tuổi: chọn trình duyệt đã đăng nhập YouTube trong Cài đặt rồi thử lại."
+    return any(h in s for h in LOGIN_HINTS) or ("age" in s and ("restrict" in s or "confirm your age" in s))
+
+
+def _explain(text, url="", tried=()):
+    s = text.lower()
+    site = site_of(url)
+    tried_txt = (" Đã thử đăng nhập từ: " + ", ".join(tried) + ".") if tried else ""
+    if "could not copy" in s and "cookie" in s or "failed to decrypt" in s or "could not find" in s and "cookies" in s:
+        return (f"Không đọc được đăng nhập từ trình duyệt.{tried_txt} Chrome/Edge mới mã hoá cookie nên hay lỗi: "
+                f"hãy đăng nhập {site} trên Firefox rồi chọn Firefox trong Cài đặt → Tải video, hoặc dùng file cookies.txt.")
+    if _needs_login(text):
+        if site == "YouTube":
+            return ("YouTube yêu cầu đăng nhập để tải video này. Vào Cài đặt → Tải video, chọn trình duyệt "
+                    "bạn đang đăng nhập YouTube (Firefox ổn định nhất; với Chrome/Edge hãy đóng trình duyệt trước), rồi thử lại."
+                    + tried_txt)
+        return (f"{site} chỉ cho xem video này khi đã đăng nhập (bài giới hạn đối tượng/độ tuổi hoặc tài khoản riêng tư)."
+                f"{tried_txt}\nCách sửa: đăng nhập {site} trên Firefox (hoặc Chrome/Edge), vào Cài đặt → Tải video chọn "
+                f"trình duyệt đó; hoặc xuất file cookies.txt (tiện ích 'Get cookies.txt LOCALLY') và chọn trong Cài đặt. "
+                f"Cũng có thể tự tải video về rồi bấm 'Tải file lên'.")
     if "private video" in s or "members-only" in s or "join this channel" in s:
         return "Video riêng tư hoặc chỉ dành cho hội viên, không tải được."
     if "video unavailable" in s or "has been removed" in s or "not available in your country" in s:
         return "Video không còn tồn tại, bị chặn ở quốc gia của bạn, hoặc link sai."
     if "is not a valid url" in s or "unsupported url" in s:
         return "Link không hợp lệ hoặc trang này không được hỗ trợ."
-    if "could not copy" in s and "cookie" in s:
-        return "Không đọc được đăng nhập từ trình duyệt: hãy đóng hẳn trình duyệt đó rồi thử lại (hoặc chọn Firefox)."
     if "http error 403" in s:
-        return "YouTube từ chối tải (403). Thử lại sau ít phút, hoặc bật dùng đăng nhập trình duyệt trong Cài đặt."
+        return f"{site} từ chối tải (403). Thử lại sau ít phút, hoặc chọn trình duyệt đã đăng nhập trong Cài đặt."
     if "timed out" in s or "connection" in s or "getaddrinfo" in s or "network" in s:
         return "Lỗi mạng khi tải video. Kiểm tra kết nối Internet rồi thử lại."
     tail = "\n".join(text.strip().splitlines()[-2:])
     return f"Không tải được video.\n{tail}"
 
 
-def _needs_login(text):
-    s = text.lower()
-    return "sign in to confirm" in s or "not a bot" in s or ("age" in s and "restrict" in s)
+def installed_browsers():
+    """Browsers with a profile on this PC, best first for cookie reading (Firefox keeps cookies readable;
+    new Chrome/Edge encrypt them per app, which often fails)."""
+    out = []
+    if os.name == "nt":
+        appdata, local = os.environ.get("APPDATA", ""), os.environ.get("LOCALAPPDATA", "")
+        cands = [("firefox", os.path.join(appdata, "Mozilla", "Firefox", "Profiles")),
+                 ("edge", os.path.join(local, "Microsoft", "Edge", "User Data")),
+                 ("chrome", os.path.join(local, "Google", "Chrome", "User Data")),
+                 ("brave", os.path.join(local, "BraveSoftware", "Brave-Browser", "User Data")),
+                 ("opera", os.path.join(appdata, "Opera Software", "Opera Stable")),
+                 ("vivaldi", os.path.join(local, "Vivaldi", "User Data"))]
+    else:
+        home = os.path.expanduser("~")
+        cands = [("firefox", os.path.join(home, ".mozilla", "firefox")),
+                 ("firefox", os.path.join(home, "Library", "Application Support", "Firefox")),
+                 ("chrome", os.path.join(home, ".config", "google-chrome")),
+                 ("chrome", os.path.join(home, "Library", "Application Support", "Google", "Chrome")),
+                 ("edge", os.path.join(home, ".config", "microsoft-edge")),
+                 ("brave", os.path.join(home, ".config", "BraveSoftware", "Brave-Browser"))]
+    for name, path in cands:
+        if os.path.isdir(path) and name not in out:
+            out.append(name)
+    return out
 
 
 class Downloader:
@@ -47,7 +101,7 @@ class Downloader:
         self.log, self.progress, self.cancelled = log, progress, cancelled
         self.proc = None
 
-    def _args(self, url, out_dir, max_height, browser):
+    def _args(self, url, out_dir, max_height, browser, cookies=None):
         H = max_height
         fmt = (f"bv*[height<={H}][vcodec^=avc1]+ba[ext=m4a]/bv*[height<={H}][ext=mp4]+ba[ext=m4a]/"
                f"bv*[height<={H}]+ba/b[height<={H}]/bv*+ba/b")
@@ -60,7 +114,9 @@ class Downloader:
              "--sub-format", "vtt/srt/best", "--ignore-errors",
              "--progress-template", "download:[dl] %(progress._percent_str)s %(progress._speed_str)s ETA %(progress._eta_str)s",
              "-o", os.path.join(out_dir, "source.%(ext)s"), url]
-        if browser:
+        if cookies:
+            a[1:1] = ["--cookies", cookies]
+        elif browser:
             a[1:1] = ["--cookies-from-browser", browser]
         return a
 
@@ -107,18 +163,24 @@ class Downloader:
         t.join(5)
         return self.proc.returncode, "\n".join(lines)
 
-    def download(self, url, out_dir, max_height=1080, browser=None):
-        """Returns (video_path, subtitle_path_or_None, info dict)."""
+    def download(self, url, out_dir, max_height=1080, browser=None, cookies_file=None):
+        """Returns (video_path, subtitle_path_or_None, info dict).
+        Order: cookies.txt if given, else the chosen browser, else no login; when the site asks for a login
+        (Instagram restricted reels, TikTok, age-gated YouTube...) every browser installed on the PC is tried."""
         os.makedirs(out_dir, exist_ok=True)
-        attempts = [browser] if browser else [None]
-        tried_stall = False
-        i = 0
+        cookies = cookies_file if cookies_file and os.path.isfile(cookies_file) else None
+        attempts = [("file", cookies)] if cookies else [("browser", browser)] if browser else [("none", None)]
+        tried, tried_stall, auto_added = [], False, False
+        i, text = 0, ""
         while i < len(attempts):
-            b = attempts[i]
-            if b:
-                self.log(f"Thử lại bằng đăng nhập YouTube từ {b}...")
+            kind, val = attempts[i]
+            if kind == "browser" and val:
+                self.log(f"Dùng đăng nhập {site_of(url)} từ trình duyệt {val}...")
+            elif kind == "file":
+                self.log("Dùng đăng nhập từ file cookies.txt...")
             self.progress(0, "Đang lấy thông tin video...")
-            code, text = self._run_once(self._args(url, out_dir, max_height, b))
+            code, text = self._run_once(self._args(url, out_dir, max_height,
+                                                   val if kind == "browser" else None, val if kind == "file" else None))
             if self.cancelled():
                 raise DownloadError("Đã huỷ.")
             video = os.path.join(out_dir, "source.mp4")
@@ -129,10 +191,17 @@ class Downloader:
             if code == -9 and not tried_stall:
                 tried_stall = True
                 continue  # one retry after a stall
+            if kind == "browser" and val:
+                tried.append(val)
+            if _needs_login(text) and not auto_added:
+                auto_added = True
+                more = [b for b in installed_browsers() if b != browser]
+                if more:
+                    self.log(f"{site_of(url)} đòi đăng nhập: thử lấy đăng nhập từ trình duyệt trên máy "
+                             f"({', '.join(more)})...")
+                attempts += [("browser", b) for b in more]
             i += 1
-            if i >= len(attempts):
-                raise DownloadError(_explain(text))
-        raise DownloadError("Không tải được video.")
+        raise DownloadError(_explain(text, url, tried))
 
     def kill(self):
         if self.proc and self.proc.poll() is None:

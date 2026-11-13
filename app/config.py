@@ -95,7 +95,14 @@ DEFAULTS = {
     "hook": True,
     "whisper_model": "small",
     "output_dir": "",
-    "zoom_fx": "medium",              # off | light | medium | strong - music-synced zoom effects
+    "zoom_fx": "off",                 # legacy music-synced zoom (removed from the UI)
+    "caption_preset": "classic",      # typography preset (render_clips.CAPTION_PRESETS)
+    "cap_color": "",                  # "" = the preset's own highlight colour, else RRGGBB
+    "emphasis": True,                 # colour numbers / money / power words
+    "jumpcut": True,                  # cut pauses and filler sounds (talking videos)
+    "progress_bar": False,            # thin progress bar along the bottom
+    "ai_framing": True,               # with an AI provider: the model checks the framing of every shot
+    "cookies_file": "",               # cookies.txt exported from a logged-in browser (Instagram, TikTok...)
     "encoder": "auto",                # auto (GPU if available) | x264 (CPU)
     "browser": "",                    # "" | firefox | chrome | edge | brave - YouTube login fallback
 }
@@ -119,6 +126,7 @@ def load():
         pass
     if not cfg.get("output_dir"):
         cfg["output_dir"] = default_output_dir()
+    cfg["zoom_fx"] = "off"  # the music-zoom option was removed
     return cfg
 
 

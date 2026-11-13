@@ -6,12 +6,17 @@ import customtkinter as ctk
 from . import config, research, tools
 
 MODES = ["Tìm theo từ khoá", "Kênh theo dõi"]
-PERIODS = [("today", "Hôm nay"), ("week", "Tuần này"), ("month", "Tháng này"), ("year", "Năm nay"), ("any", "Mọi lúc")]
-LENGTHS = [("long", "Dài >20 phút"), ("medium", "4–20 phút"), ("any", "Mọi độ dài")]
-SORTS = [("views", "Lượt xem"), ("date", "Mới nhất"), ("relevance", "Liên quan")]
-COUNTS = [("20", "20"), ("40", "40")]
+PERIODS = [("hour", "1 giờ"), ("today", "Hôm nay"), ("week", "Tuần này"), ("month", "Tháng này"), ("year", "Năm nay"),
+           ("any", "Mọi lúc")]
+LENGTHS = [("long", "Dài >20 phút"), ("medium", "4–20 phút"), ("short", "Ngắn <4 phút"), ("any", "Mọi độ dài")]
+SORTS = [("hot", "Điểm Hot"), ("velocity", "View/giờ"), ("outlier", "Vượt trội"), ("views", "Lượt xem"),
+         ("date", "Mới nhất")]
+COUNTS = [("10", "10"), ("20", "20"), ("40", "40")]
+PLAT_COLORS = {"YouTube": "#EF4444", "YouTube Shorts": "#F43F5E", "TikTok": "#111827", "Instagram": "#C026D3",
+               "Twitch": "#9146FF", "Kick": "#53FC18", "Dailymotion": "#0066DC", "Bilibili": "#00A1D6",
+               "X": "#000000", "Rumble": "#85C742"}
 PER_CHANNEL = [("5", "5"), ("10", "10"), ("20", "20")]
-TAG_COLORS = {"Đang lên": "#F97316", "Mới": "#22C55E", "Dài": "#64748B", "Đang live": "#EF4444", "Đã cắt": "#6366F1"}
+TAG_COLORS = {"Vượt trội": "#DC2626", "Đang lên": "#F97316", "Mới": "#22C55E", "Dài": "#64748B", "Đang live": "#EF4444", "Đã cắt": "#6366F1"}
 
 
 def _lbl(pairs, key):
@@ -52,25 +57,71 @@ class ResearchMixin:
         kw.grid_columnconfigure(0, weight=1)
         self.rs_query = ctk.CTkEntry(kw, height=48, corner_radius=12, border_width=0, fg_color=T["CARD2"],
                                      font=self.font(15), text_color=T["TEXT"], placeholder_text_color=T["MUTED"],
-                                     placeholder_text="Từ khoá: tên project, creator, chủ đề trend... (vd: bitcoin podcast)")
+                                     placeholder_text="Từ khoá: project, creator, trend... nhiều từ khoá cách nhau "
+                                                      "bằng dấu phẩy (vd: bitcoin podcast, crypto news)")
         self.rs_query.grid(row=0, column=0, sticky="ew", padx=(12, 8), pady=(12, 8))
         self.rs_query.bind("<Return>", lambda _: self._rs_search())
         self.rs_go = self.button(kw, "Tìm  →", self._rs_search, primary=True, height=48, width=120)
         self.rs_go.grid(row=0, column=1, padx=(0, 12), pady=(12, 8))
-        filt = ctk.CTkFrame(kw, fg_color="transparent")
-        filt.grid(row=1, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 12))
         rcfg = self.cfg.setdefault("research", {})
+        self.muted(kw, "Quét trên nền tảng (chọn một hoặc nhiều)", 11).grid(row=1, column=0, columnspan=2, sticky="w",
+                                                                         padx=14)
+        chips = ctk.CTkFrame(kw, fg_color="transparent")
+        chips.grid(row=2, column=0, columnspan=2, sticky="ew", padx=12, pady=(2, 4))
+        self.rs_plats = set(rcfg.get("platforms") or ["yt_long"])
+        self.rs_chip = {}
+        for i, (k, P) in enumerate(research.PLATFORMS.items()):
+            b = ctk.CTkButton(chips, text=P["label"], height=30, corner_radius=15, font=self.font(12, "bold"),
+                              border_width=1, command=lambda k=k: self._rs_toggle_plat(k))
+            b.grid(row=i // 6, column=i % 6, padx=(0, 6), pady=3, sticky="w")
+            self.rs_chip[k] = b
+        self.rs_plat_hint = self.muted(kw, "", 11, wraplength=880)
+        self.rs_plat_hint.grid(row=3, column=0, columnspan=2, sticky="w", padx=14)
+        self._rs_toggle_plat(None)
+        filt = ctk.CTkFrame(kw, fg_color="transparent")
+        filt.grid(row=4, column=0, columnspan=2, sticky="ew", padx=12, pady=(6, 12))
         self.rs_period = self._rs_filter(filt, 0, "Đăng trong", PERIODS, rcfg.get("period", "week"))
-        self.rs_len = self._rs_filter(filt, 1, "Độ dài", LENGTHS, rcfg.get("length", "long"))
-        self.rs_sort = self._rs_filter(filt, 0, "Sắp xếp", SORTS, rcfg.get("sort", "views"), row=1)
-        self.rs_count = self._rs_filter(filt, 1, "Số kết quả", COUNTS, str(rcfg.get("count", 20)), row=1)
+        self.rs_len = self._rs_filter(filt, 1, "Độ dài", LENGTHS, rcfg.get("length", "any"))
+        self.rs_count = self._rs_filter(filt, 2, "Kết quả mỗi nền tảng", COUNTS, str(rcfg.get("count", 20)))
         self.rs_kw_card = kw
+
+        # viral filters (both modes): applied instantly to the results
+        vf = self.card(wrap)
+        vf.grid(row=4, column=0, sticky="ew", pady=(12, 0))
+        self.rs_vf_card = vf
+        self.muted(vf, "Bộ lọc viral (áp dụng ngay lên kết quả)", 12).grid(row=0, column=0, columnspan=6, sticky="w",
+                                                                         padx=14, pady=(10, 2))
+        self.rs_sort = self._rs_filter(vf, 0, "Sắp xếp theo", SORTS, rcfg.get("order", "hot"), row=1)
+        self.rs_sort.configure(command=lambda _: self._rs_apply())
+        self.rs_sort.master.grid_configure(padx=(12, 18), columnspan=3)
+
+        def entry(col, title, key, ph, width=110):
+            box = ctk.CTkFrame(vf, fg_color="transparent")
+            box.grid(row=2, column=col, sticky="w", padx=(12 if col == 0 else 0, 14), pady=(0, 12))
+            self.muted(box, title, 11).grid(row=0, column=0, sticky="w")
+            e = ctk.CTkEntry(box, width=width, height=30, corner_radius=8, border_width=0, fg_color=T["CARD2"],
+                             font=self.font(12), text_color=T["TEXT"], placeholder_text=ph,
+                             placeholder_text_color=T["MUTED"])
+            if rcfg.get(key):
+                e.insert(0, str(rcfg[key]))
+            e.grid(row=1, column=0, sticky="w")
+            e.bind("<KeyRelease>", lambda _: self._rs_apply_later())
+            return e
+        self.rs_minv = entry(0, "Lượt xem tối thiểu", "min_views", "vd: 50000")
+        self.rs_minvph = entry(1, "View/giờ tối thiểu", "min_vph", "vd: 1000")
+        self.rs_minhot = entry(2, "Điểm Hot tối thiểu", "min_hot", "0–100", 90)
+        self.rs_excl = entry(3, "Loại trừ từ (dấu phẩy)", "exclude", "vd: reaction, live", 200)
+        self.rs_outl = ctk.CTkSwitch(vf, text="Chỉ video vượt trội\n(≥2× view thường của kênh)", font=self.font(12),
+                                     text_color=T["TEXT"], progress_color=T["ACCENT"], command=self._rs_apply)
+        (self.rs_outl.select if rcfg.get("outliers") else self.rs_outl.deselect)()
+        self.rs_outl.grid(row=2, column=4, sticky="w", pady=(0, 12))
 
         # watched channels card
         ch = self.card(wrap)
         ch.grid_columnconfigure(0, weight=1)
-        self.muted(ch, "Mỗi dòng một kênh: YouTube (@kenh), Twitch, Kick hoặc TikTok (@user). App lấy video mới nhất "
-                       "của từng kênh rồi xếp theo điểm Hot.", 12, wraplength=880).grid(row=0, column=0, columnspan=3, sticky="w",
+        self.muted(ch, "Mỗi dòng một link kênh: YouTube, Twitch, Kick, TikTok, Instagram, X, Dailymotion, Bilibili, "
+                       "Rumble... App lấy video mới nhất của từng kênh, so với view thường của kênh để tìm video vượt "
+                       "trội, rồi xếp theo điểm Hot.", 12, wraplength=880).grid(row=0, column=0, columnspan=3, sticky="w",
                                                                         padx=14, pady=(12, 6))
         self.rs_sources = ctk.CTkTextbox(ch, height=110, fg_color=T["CARD2"], text_color=T["TEXT"], font=self.font(13),
                                          corner_radius=10)
@@ -85,13 +136,13 @@ class ResearchMixin:
 
         # status
         self.rs_status = self.muted(wrap, "", 13, wraplength=900)
-        self.rs_status.grid(row=4, column=0, sticky="w", pady=(10, 0))
+        self.rs_status.grid(row=5, column=0, sticky="w", pady=(10, 0))
         self.rs_bar = ctk.CTkProgressBar(wrap, height=4, progress_color=T["ACCENT"], fg_color=T["CARD2"],
                                          mode="indeterminate")
 
         # results
         head = ctk.CTkFrame(wrap, fg_color="transparent")
-        head.grid(row=6, column=0, sticky="ew", pady=(14, 6))
+        head.grid(row=7, column=0, sticky="ew", pady=(14, 6))
         head.grid_columnconfigure(0, weight=1)
         self.rs_head = self.h(head, "", 18)
         self.rs_head.grid(row=0, column=0, sticky="w")
@@ -100,17 +151,17 @@ class ResearchMixin:
         self.rs_hide_done.grid(row=0, column=1, padx=10)
         self.button(head, "Chọn top 5", lambda: self._rs_select_top(5), height=32, width=100).grid(row=0, column=2)
         self.rs_list = ctk.CTkFrame(wrap, fg_color="transparent")
-        self.rs_list.grid(row=7, column=0, sticky="ew")
+        self.rs_list.grid(row=8, column=0, sticky="ew")
         self.rs_list.grid_columnconfigure(0, weight=1)
         act = ctk.CTkFrame(wrap, fg_color="transparent")
-        act.grid(row=8, column=0, sticky="ew", pady=(12, 0))
+        act.grid(row=9, column=0, sticky="ew", pady=(12, 0))
         act.grid_columnconfigure(0, weight=1)
         self.rs_sel_lbl = self.muted(act, "", 13)
         self.rs_sel_lbl.grid(row=0, column=0, sticky="w")
         self.rs_queue_btn = self.button(act, "Thêm vào hàng chờ cắt clip", self._rs_queue_selected, primary=True,
                                         height=44, width=260)
         self.rs_queue_btn.grid(row=0, column=1)
-        self.rs_items, self.rs_checks, self._rs_imgs = [], {}, {}
+        self.rs_items, self.rs_raw, self.rs_checks, self._rs_imgs = [], [], {}, {}
         self._rs_switch()
         self._rs_render()
 
@@ -122,6 +173,46 @@ class ResearchMixin:
         s.configure(height=30, font=self.font(12))
         s.grid(row=1, column=0, sticky="w")
         return s
+
+    def _rs_toggle_plat(self, key):
+        T = self.theme
+        if key:
+            if key in self.rs_plats and len(self.rs_plats) > 1:
+                self.rs_plats.discard(key)
+            else:
+                self.rs_plats.add(key)
+        for k, b in self.rs_chip.items():
+            on = k in self.rs_plats
+            b.configure(fg_color=T["ACCENT"] if on else T["CARD2"], hover_color=T["ACCENT_HOVER"] if on else T["BORDER"],
+                        text_color="#03161A" if on else T["TEXT"], border_color=T["ACCENT"] if on else T["BORDER"])
+        hints = [research.PLATFORMS[k].get("hint") for k in research.PLATFORMS if k in self.rs_plats]
+        self.rs_plat_hint.configure(text="  ".join(dict.fromkeys(h for h in hints if h)))
+
+    def _rs_filters(self):
+        def num(e):
+            t = e.get().strip().replace(".", "").replace(",", "").lower()
+            mult = 1000 if t.endswith("k") else 1_000_000 if t.endswith("m") else 1
+            t = t.rstrip("km")
+            return int(float(t) * mult) if t.replace(".", "").isdigit() else 0
+        return {"min_views": num(self.rs_minv), "min_vph": num(self.rs_minvph), "min_hot": num(self.rs_minhot),
+                "exclude": self.rs_excl.get().strip(), "outliers": bool(self.rs_outl.get()),
+                "order": _key(SORTS, self.rs_sort.get()),
+                "period": _key(PERIODS, self.rs_period.get()) if self.rs_mode.get() == MODES[0] else None,
+                "length": _key(LENGTHS, self.rs_len.get()) if self.rs_mode.get() == MODES[0] else None}
+
+    def _rs_apply_later(self):
+        if getattr(self, "_rs_after", None):
+            self.after_cancel(self._rs_after)
+        self._rs_after = self.after(400, self._rs_apply)
+
+    def _rs_apply(self):
+        self._rs_after = None
+        self.rs_items = research.apply_filters(list(getattr(self, "rs_raw", [])), self._rs_filters())
+        self._rs_render()
+        try:
+            self._rs_save_cfg()
+        except Exception:
+            pass
 
     def _rs_switch(self):
         kw = self.rs_mode.get() == MODES[0]
@@ -135,7 +226,7 @@ class ResearchMixin:
         for b in (self.rs_go, self.rs_scan):
             b.configure(state="disabled" if on else "normal")
         if on:
-            self.rs_bar.grid(row=5, column=0, sticky="ew", pady=(6, 0))
+            self.rs_bar.grid(row=6, column=0, sticky="ew", pady=(6, 0))
             self.rs_bar.start()
         else:
             self.rs_bar.stop()
@@ -143,13 +234,17 @@ class ResearchMixin:
 
     def _researcher(self, log):
         t = tools.ensure(log)
-        return research.Researcher(t["yt-dlp"], t["deno"], self.cfg.get("browser") or None, log)
+        return research.Researcher(t["yt-dlp"], t["deno"], self.cfg.get("browser") or None, log,
+                                   cookies=self.cfg.get("cookies_file") or None)
 
     def _rs_save_cfg(self):
         r = self.cfg.setdefault("research", {})
+        f = self._rs_filters()
         r.update(period=_key(PERIODS, self.rs_period.get()), length=_key(LENGTHS, self.rs_len.get()),
-                 sort=_key(SORTS, self.rs_sort.get()), count=int(_key(COUNTS, self.rs_count.get())),
-                 per_channel=int(_key(PER_CHANNEL, self.rs_per.get())))
+                 order=f["order"], count=int(_key(COUNTS, self.rs_count.get())),
+                 per_channel=int(_key(PER_CHANNEL, self.rs_per.get())), platforms=sorted(self.rs_plats),
+                 min_views=f["min_views"] or "", min_vph=f["min_vph"] or "", min_hot=f["min_hot"] or "",
+                 exclude=f["exclude"], outliers=f["outliers"])
         self.cfg["watch_sources"] = [l.strip() for l in self.rs_sources.get("1.0", "end").splitlines() if l.strip()]
         config.save(self.cfg)
 
@@ -160,12 +255,18 @@ class ResearchMixin:
             return
         self._rs_save_cfg()
         r = self.cfg["research"]
-        self._rs_busy(True, f"Đang tìm “{q}” trên YouTube...")
+        keys = [k for k in research.PLATFORMS if k in self.rs_plats]
+        queries = [x.strip() for x in q.split(",") if x.strip()][:5]
+        names = ", ".join(research.PLATFORMS[k]["label"] for k in keys)
+        self._rs_busy(True, f"Đang tìm “{q}” trên {names}...")
+        yt_sort = "date" if r["order"] == "date" else "views"
 
         def work(rs):
-            items = rs.search(q, r["period"], r["length"], r["sort"], r["count"])
-            self.q.put(("rs_status", f"Tìm thấy {len(items)} video, đang lấy ngày đăng để chấm điểm Hot..."))
-            return rs.enrich(items, top=12), []
+            items, errors = rs.search_many(keys, queries, r["period"], r["length"], yt_sort, r["count"],
+                                           progress=lambda m: self.q.put(("rs_status", m + "...")))
+            self.q.put(("rs_status", f"Tìm thấy {len(items)} video, đang lấy ngày đăng và view thường của kênh "
+                                     f"để chấm điểm Hot..."))
+            return rs.enrich(items, top=15), errors
         self._rs_run(work, f"“{q}”")
 
     def _rs_scan(self):
@@ -205,10 +306,13 @@ class ResearchMixin:
             if items is None:
                 self.rs_status.configure(text=errors[0], text_color="#F87171")
                 return
-            self.rs_items, self.rs_checks = items, {}
-            msg = f"Xong: {len(items)} video cho {what}, sắp theo điểm Hot (tốc độ tăng view, độ mới, độ dài, tương tác)."
+            self.rs_raw, self.rs_checks = items, {}
+            self.rs_items = research.apply_filters(list(items), self._rs_filters())
+            hidden = len(items) - len(self.rs_items)
+            msg = (f"Xong: {len(items)} video cho {what}" + (f", bộ lọc viral ẩn {hidden}" if hidden else "") +
+                   ". Điểm Hot = tốc độ tăng view, độ mới, độ dài, tương tác, mức vượt trội so với kênh.")
             if errors:
-                msg += "\nKhông quét được: " + " | ".join(errors)
+                msg += "\nKhông quét được: " + " | ".join(errors[:4])
             self.rs_status.configure(text=msg, text_color="#FBBF24" if errors else self.theme["MUTED"])
             self._rs_render()
         elif kind == "rs_thumb":
@@ -253,14 +357,20 @@ class ResearchMixin:
                 self._rs_load_thumb(x["url"], x["thumb"])
             ctk.CTkLabel(row, text=x["title"], font=self.font(14, "bold"), text_color=T["TEXT"], anchor="w",
                          justify="left", wraplength=560).grid(row=0, column=3, sticky="sw", pady=(10, 0))
-            meta = " · ".join(v for v in (x["platform"], x["channel"], f"{research.human_views(x['views'])} view",
+            vph = f"{research.human_views(x['velocity'])} view/giờ" if x.get("velocity") else ""
+            meta = " · ".join(v for v in (x["channel"], f"{research.human_views(x['views'])} view", vph,
                                           research.human_dur(x["duration"]), research.human_age(x.get("age_h"))) if v)
-            self.muted(row, meta, 12).grid(row=1, column=3, sticky="w")
+            mrow = ctk.CTkFrame(row, fg_color="transparent")
+            mrow.grid(row=1, column=3, sticky="w")
+            ctk.CTkLabel(mrow, text=x["platform"], font=self.font(10, "bold"), text_color="white", height=18,
+                         corner_radius=5, fg_color=PLAT_COLORS.get(x["platform"], T["CARD2"])).grid(row=0, column=0,
+                                                                                                   ipadx=5, padx=(0, 6))
+            self.muted(mrow, meta, 12).grid(row=0, column=1, sticky="w")
             tags = ctk.CTkFrame(row, fg_color="transparent")
             tags.grid(row=2, column=3, sticky="nw", pady=(2, 10))
             for j, t in enumerate(x.get("tags", [])):
                 ctk.CTkLabel(tags, text=t, font=self.font(11, "bold"), text_color="white", corner_radius=6, height=20,
-                             fg_color=TAG_COLORS.get(t, T["CARD2"])).grid(row=0, column=j, padx=(0, 5), ipadx=6)
+                             fg_color=TAG_COLORS.get(t.split(" x")[0], T["CARD2"])).grid(row=0, column=j, padx=(0, 5), ipadx=6)
             btns = ctk.CTkFrame(row, fg_color="transparent")
             btns.grid(row=0, column=4, rowspan=3, padx=(6, 14))
             self.button(btns, "Xem", lambda u=x["url"]: webbrowser.open(u), width=70, height=32).grid(row=0, column=0,

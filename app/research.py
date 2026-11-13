@@ -1,4 +1,5 @@
-"""Find source videos to clip: keyword search (YouTube) and watched channels (YouTube, Twitch, Kick, TikTok).
+"""Find source videos to clip: keyword search per platform and watched channels (YouTube, Twitch, Kick, TikTok,
+Instagram, X, Dailymotion, Bilibili, Rumble...).
 
 Everything goes through yt-dlp in 'flat' mode (metadata only, nothing downloaded), then the most promising
 results get a full metadata pass for their upload time and engagement, and every result gets a Hot score."""
@@ -12,6 +13,27 @@ SORTS = {"relevance": 0, "date": 2, "views": 3}
 
 class ResearchError(Exception):
     pass
+
+
+# platform key -> label, how a keyword is used ("search", "tag" = hashtag page, "channel" = the words are channel
+# names, None = channels only), and a hint shown under the chips
+PLATFORMS = {
+    "yt_long":   {"label": "YouTube video dài", "kw": "search", "name": "YouTube"},
+    "yt_shorts": {"label": "YouTube Shorts", "kw": "search", "name": "YouTube Shorts"},
+    "tiktok":    {"label": "TikTok", "kw": "tag", "name": "TikTok",
+                  "hint": "TikTok: tìm theo hashtag, cần chọn trình duyệt đã đăng nhập TikTok trong Cài đặt."},
+    "instagram": {"label": "Instagram Reels", "kw": "tag", "name": "Instagram",
+                  "hint": "Instagram: tìm theo hashtag, cần đăng nhập (trình duyệt hoặc cookies.txt trong Cài đặt)."},
+    "twitch":    {"label": "Twitch", "kw": "channel", "name": "Twitch",
+                  "hint": "Twitch/Kick không có tìm kiếm công khai: gõ tên kênh (vd: xqc, kaicenat), app lấy clip "
+                          "hot 7 ngày + VOD mới."},
+    "kick":      {"label": "Kick", "kw": "channel", "name": "Kick"},
+    "dailymotion": {"label": "Dailymotion", "kw": "search", "name": "Dailymotion"},
+    "bilibili":  {"label": "Bilibili", "kw": "search", "name": "Bilibili"},
+    "x":         {"label": "X (Twitter)", "kw": "channel", "name": "X",
+                  "hint": "X: gõ tên tài khoản (vd: elonmusk), cần đăng nhập X trong trình duyệt."},
+    "rumble":    {"label": "Rumble", "kw": "channel", "name": "Rumble"},
+}
 
 
 def youtube_search_url(query, period="week", length="any", sort="views"):
@@ -29,12 +51,23 @@ def youtube_search_url(query, period="week", length="any", sort="views"):
 
 def platform_of(url):
     u = url.lower()
-    for key, name in (("youtube.com", "YouTube"), ("youtu.be", "YouTube"), ("twitch.tv", "Twitch"),
-                      ("kick.com", "Kick"), ("tiktok.com", "TikTok"), ("instagram.com", "Instagram"),
-                      ("x.com", "X"), ("twitter.com", "X")):
+    for key, name in (("youtube.com/shorts", "YouTube Shorts"), ("youtube.com", "YouTube"), ("youtu.be", "YouTube"),
+                      ("twitch.tv", "Twitch"), ("kick.com", "Kick"), ("tiktok.com", "TikTok"),
+                      ("instagram.com", "Instagram"), ("x.com", "X"), ("twitter.com", "X"),
+                      ("dailymotion.com", "Dailymotion"), ("bilibili.com", "Bilibili"), ("rumble.com", "Rumble"),
+                      ("facebook.com", "Facebook"), ("vimeo.com", "Vimeo")):
         if key in u:
             return name
     return "Web"
+
+
+def _slug_tag(q):
+    return re.sub(r"[^\w]", "", q.lower().replace(" ", ""))
+
+
+def _handles(q):
+    """'xqc, kai cenat' -> ['xqc', 'kaicenat'] (channel names typed in the keyword box)."""
+    return [re.sub(r"[^\w.-]", "", h.strip().lstrip("@").replace(" ", "")) for h in re.split(r"[,;\n]", q) if h.strip()]
 
 
 def source_listing_url(url):
@@ -47,18 +80,25 @@ def source_listing_url(url):
         return url.rstrip("/") + "/videos?filter=archives&sort=time"
     if p == "Kick" and re.search(r"kick\.com/[^/?#]+/?$", url):
         return url.rstrip("/") + "/videos"
+    if p == "Bilibili" and re.search(r"space\.bilibili\.com/\d+/?$", url):
+        return url.rstrip("/") + "/video"
+    if p == "X" and re.search(r"(x|twitter)\.com/[^/?#]+/?$", url):
+        return url.rstrip("/") + "/media"
     return url
 
 
 class Researcher:
-    def __init__(self, ytdlp, deno=None, browser=None, log=print):
+    def __init__(self, ytdlp, deno=None, browser=None, log=print, cookies=None):
         self.ytdlp, self.deno, self.browser, self.log = ytdlp, deno, browser, log
+        self.cookies = cookies if cookies and os.path.isfile(cookies) else None
 
     def _base(self):
         a = [self.ytdlp, "--no-warnings", "--ignore-errors", "--ignore-config"]
         if self.deno:
             a += ["--js-runtimes", f"deno:{self.deno}"]
-        if self.browser:
+        if self.cookies:
+            a += ["--cookies", self.cookies]
+        elif self.browser:
             a += ["--cookies-from-browser", self.browser]
         return a
 
@@ -88,28 +128,136 @@ class Researcher:
 
     # ---------- listing ----------
     def search(self, query, period="week", length="any", sort="views", n=30):
+        """YouTube keyword search (long videos)."""
         if not query.strip():
             raise ResearchError("Nhập từ khoá cần tìm.")
         d = self._json(["--flat-playlist", "-J", "--playlist-end", str(n),
                         youtube_search_url(query, period, length, sort)])
         return [self._norm(e, "YouTube") for e in (d.get("entries") or []) if e]
 
-    def channel(self, url, n=15):
+    def search_platform(self, key, query, period="week", length="any", sort="views", n=30):
+        """Keyword search on one platform. Raises ResearchError with a user-facing hint when it can't."""
+        q = query.strip()
+        if not q:
+            raise ResearchError("Nhập từ khoá cần tìm.")
+        P = PLATFORMS[key]
+        if key == "yt_long":
+            return self.search(q, period, length if length != "short" else "any", sort, n)
+        if key == "yt_shorts":
+            d = self._json(["--flat-playlist", "-J", "--playlist-end", str(n * 2),
+                            youtube_search_url(q + " #shorts", period, "short", sort)])
+            out = []
+            for e in d.get("entries") or []:
+                if e and (e.get("duration") or 0) <= 180:
+                    x = self._norm(e, "YouTube Shorts")
+                    x["url"] = f"https://www.youtube.com/shorts/{e['id']}"
+                    out.append(x)
+            return out[:n]
+        if key == "dailymotion":
+            return self._dailymotion(q, period, sort, n)
+        if key == "bilibili":
+            d = self._json(["--flat-playlist", "-J", f"bilisearch{n}:{q}"])
+            return [self._norm(e, "Bilibili") for e in d.get("entries") or [] if e]
+        if key == "tiktok":
+            return self.channel(f"https://www.tiktok.com/tag/{_slug_tag(q)}", n, platform="TikTok")
+        if key == "instagram":
+            return self.channel(f"https://www.instagram.com/explore/tags/{_slug_tag(q)}/", n, platform="Instagram")
+        if P["kw"] == "channel":
+            urls = []
+            for h in _handles(q)[:8]:
+                if key == "twitch":
+                    urls += [f"https://www.twitch.tv/{h}/clips?filter=clips&range=7d", f"https://www.twitch.tv/{h}"]
+                elif key == "kick":
+                    urls.append(f"https://kick.com/{h}")
+                elif key == "x":
+                    urls.append(f"https://x.com/{h}")
+                elif key == "rumble":
+                    urls.append(f"https://rumble.com/c/{h}")
+            items, errors = self.channels(urls, max(5, n // max(1, len(urls))))
+            if not items and errors:
+                raise ResearchError(errors[0])
+            return items
+        raise ResearchError(f"{P['label']}: chưa hỗ trợ tìm theo từ khoá.")
+
+    def _dailymotion(self, q, period, sort, n):
+        import httpx
+        params = {"search": q, "limit": min(100, n), "sort": "recent" if sort == "date" else "relevance",
+                  "fields": "id,title,views_total,duration,created_time,owner.username,thumbnail_360_url,url,likes_total"}
+        days = {"hour": 1 / 24, "today": 1, "week": 7, "month": 30, "year": 365}.get(period)
+        if days:
+            params["created_after"] = int(time.time() - days * 86400)
+        try:
+            r = httpx.get("https://api.dailymotion.com/videos", params=params, timeout=20)
+            r.raise_for_status()
+        except Exception as e:
+            raise ResearchError(f"Dailymotion không phản hồi ({e}).")
+        out = []
+        for e in r.json().get("list", []):
+            out.append({"id": e["id"], "url": e.get("url") or f"https://www.dailymotion.com/video/{e['id']}",
+                        "title": e.get("title") or "", "channel": e.get("owner.username") or "",
+                        "platform": "Dailymotion", "channel_id": e.get("owner.username"),
+                        "views": e.get("views_total"), "duration": e.get("duration"), "ts": e.get("created_time"),
+                        "likes": e.get("likes_total"), "comments": None, "thumb": e.get("thumbnail_360_url"),
+                        "live": False})
+        return out
+
+    def search_many(self, keys, queries, period, length, sort, n, progress=None):
+        """Every keyword on every chosen platform, in parallel. Returns (items, errors per platform)."""
+        jobs = [(k, q) for k in keys for q in queries]
+        items, errors, seen = [], [], set()
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            futs = {ex.submit(self.search_platform, k, q, period, length, sort, n): (k, q) for k, q in jobs}
+            for f, (k, q) in futs.items():
+                try:
+                    got = f.result()
+                except ResearchError as e:
+                    errors.append(f"{PLATFORMS[k]['label']}: {e}")
+                    continue
+                except Exception as e:
+                    errors.append(f"{PLATFORMS[k]['label']}: {e}")
+                    continue
+                for x in got:
+                    if x["url"] not in seen:
+                        seen.add(x["url"])
+                        x["query"] = q
+                        items.append(x)
+                if progress:
+                    progress(f"{PLATFORMS[k]['label']}: {len(got)} video cho “{q}”")
+        return items, errors
+
+    def channel(self, url, n=15, platform=None):
         lst = source_listing_url(url)
+        plat = platform or platform_of(url)
         d = self._json(["--flat-playlist", "-J", "--playlist-end", str(n), lst])
         if d.get("_type") != "playlist":   # a single video link
-            return [self._norm(d, platform_of(url))]
+            return [self._norm(d, plat)]
         entries = [e for e in (d.get("entries") or []) if e]
         if not entries:
+            if plat in ("Instagram", "TikTok", "X"):
+                raise ResearchError(f"{plat} không trả về video (thường do chưa đăng nhập): chọn trình duyệt đã đăng "
+                                    f"nhập {plat} hoặc file cookies.txt trong Cài đặt → Tải video.")
             raise ResearchError(f"Không lấy được video từ {url} (nền tảng chặn hoặc kênh trống).")
-        return [self._norm(e, platform_of(url), d.get("uploader") or d.get("channel") or d.get("title"))
-                for e in entries]
+        out = [self._norm(e, plat, d.get("uploader") or d.get("channel") or d.get("title")) for e in entries]
+        # channel median: what this channel normally gets, for the "vượt trội" (outlier) score
+        views = sorted(x["views"] for x in out if x.get("views"))
+        if len(views) >= 4:
+            med = views[len(views) // 2]
+            for x in out:
+                x["ch_median"] = med
+        return out
 
     def channels(self, urls, n=10):
         """Scan several channels in parallel; errors are reported per channel, results merged."""
         results, errors = [], []
+        expanded = []
+        for u in (u.strip() for u in urls if u.strip()):
+            m = re.match(r"(https?://(?:www\.)?twitch\.tv/[^/?#]+)/?$", u)
+            if m and f"{m.group(1)}/clips?filter=clips&range=7d" not in expanded:
+                expanded.append(f"{m.group(1)}/clips?filter=clips&range=7d")  # the week's top clips too
+            expanded.append(u)
+        urls = list(dict.fromkeys(expanded))
         with ThreadPoolExecutor(max_workers=4) as ex:
-            futs = {ex.submit(self.channel, u, n): u for u in urls if u.strip()}
+            futs = {ex.submit(self.channel, u, n): u for u in urls}
             for f, u in futs.items():
                 try:
                     results += f.result()
@@ -124,7 +272,7 @@ class Researcher:
             url = f"https://www.youtube.com/watch?v={e['id']}"
         thumbs = e.get("thumbnails") or []
         thumb = e.get("thumbnail") or (thumbs[-1]["url"] if thumbs else None)
-        if platform == "YouTube" and e.get("id"):
+        if platform.startswith("YouTube") and e.get("id"):
             thumb = f"https://i.ytimg.com/vi/{e['id']}/mqdefault.jpg"
         ts = e.get("timestamp") or e.get("release_timestamp")
         if not ts and e.get("upload_date"):
@@ -141,9 +289,11 @@ class Researcher:
 
     # ---------- enrichment ----------
     def enrich(self, items, top=12):
-        """Upload times (and engagement where cheap). YouTube: the channel RSS feed first (one light request per
-        channel, gives the publish time of its latest 15 videos), then full metadata for what's still missing."""
-        self._rss_times([x for x in items if x["platform"] == "YouTube" and not x["ts"] and x.get("channel_id")])
+        """Upload times, channel medians (outliers) and engagement where cheap. YouTube: the channel RSS feed first
+        (one light request per channel: publish time and views of its latest 15 videos), then full metadata for
+        what's still missing."""
+        yt = [x for x in items if x["platform"].startswith("YouTube") and x.get("channel_id")]
+        self._rss(yt)
         need = [x for x in sorted(items, key=lambda x: -(x["views"] or 0)) if not x["ts"] and not x["live"]][:top]
 
         def one(x):
@@ -158,11 +308,19 @@ class Researcher:
             x["duration"] = d.get("duration") or x["duration"]
         with ThreadPoolExecutor(max_workers=4) as ex:
             list(ex.map(one, need))
+        # channels seen several times in the results: their median is a fallback baseline
+        by = {}
+        for x in items:
+            if x.get("views") and x.get("channel"):
+                by.setdefault((x["platform"], x["channel"]), []).append(x["views"])
+        for x in items:
+            v = sorted(by.get((x["platform"], x.get("channel")), []))
+            if not x.get("ch_median") and len(v) >= 3:
+                x["ch_median"] = v[len(v) // 2]
         return items
 
-
     @staticmethod
-    def _rss_times(items):
+    def _rss(items, max_channels=30):
         import calendar
         import httpx
         by_ch = {}
@@ -173,21 +331,30 @@ class Researcher:
             try:
                 r = httpx.get(f"https://www.youtube.com/feeds/videos.xml?channel_id={cid}", timeout=15)
                 if r.status_code != 200:
-                    return {}
+                    return {}, None
             except httpx.HTTPError:
-                return {}
-            out = {}
-            for vid, pub in re.findall(r"<yt:videoId>([^<]+)</yt:videoId>.*?<published>([^<]+)</published>",
-                                       r.text, flags=re.S):
-                try:
-                    out[vid] = calendar.timegm(time.strptime(pub[:19], "%Y-%m-%dT%H:%M:%S"))
-                except ValueError:
-                    pass
-            return out
+                return {}, None
+            out, views = {}, []
+            for entry in re.findall(r"<entry>(.*?)</entry>", r.text, flags=re.S):
+                vid = re.search(r"<yt:videoId>([^<]+)</yt:videoId>", entry)
+                pub = re.search(r"<published>([^<]+)</published>", entry)
+                vw = re.search(r'<media:statistics views="(\d+)"', entry)
+                if vw:
+                    views.append(int(vw.group(1)))
+                if vid and pub:
+                    try:
+                        out[vid.group(1)] = calendar.timegm(time.strptime(pub.group(1)[:19], "%Y-%m-%dT%H:%M:%S"))
+                    except ValueError:
+                        pass
+            views.sort()
+            return out, (views[len(views) // 2] if len(views) >= 4 else None)
+        chans = list(by_ch)[:max_channels]
         with ThreadPoolExecutor(max_workers=6) as ex:
-            for cid, times in zip(by_ch, ex.map(feed, list(by_ch))):
+            for cid, (times, med) in zip(chans, ex.map(feed, chans)):
                 for x in by_ch[cid]:
-                    x["ts"] = times.get(x["id"]) or x["ts"]
+                    x["ts"] = x["ts"] or times.get(x["id"])
+                    if med:
+                        x["ch_median"] = med
 
 
 # ---------- scoring ----------
@@ -241,7 +408,46 @@ def score(items, done_ids=()):
         vr = _rank([x.get("views") for x in items])
         for x, v in zip(items, vr):
             x["hot"] = int(round(100 * (0.65 * v + 0.2 * x["fit"] + 0.15 * 0.3)))
+    for x in items:
+        # outlier: this video vs what its channel normally gets - the strongest "it's going viral" signal
+        med = x.get("ch_median")
+        x["outlier"] = round(x["views"] / med, 1) if med and x.get("views") else None
+        if x["outlier"] and x["outlier"] >= 3:
+            x["tags"].insert(0, f"Vượt trội x{x['outlier']:g}")
+            x["hot"] = min(100, x["hot"] + min(15, int(3 * math.log2(x["outlier"]))))
     return sorted(items, key=lambda x: -x["hot"])
+
+
+MAX_AGE_H = {"hour": 1, "today": 24, "week": 24 * 7, "month": 24 * 31, "year": 24 * 366}
+LENGTH_RANGE = {"short": (0, 240), "medium": (240, 1200), "long": (1200, 10 ** 7)}
+SORT_KEYS = {"hot": lambda x: -x["hot"], "views": lambda x: -(x.get("views") or 0),
+             "velocity": lambda x: -(x.get("velocity") or 0), "date": lambda x: -(x.get("ts") or 0),
+             "outlier": lambda x: -(x.get("outlier") or 0)}
+
+
+def apply_filters(items, f):
+    """Viral filters on the scored list: min views, min views/hour, max age, length, exclude words, outliers only."""
+    out = []
+    excl = [w.strip().lower() for w in (f.get("exclude") or "").split(",") if w.strip()]
+    for x in items:
+        if f.get("min_views") and (x.get("views") or 0) < f["min_views"]:
+            continue
+        if f.get("min_vph") and (x.get("velocity") or 0) < f["min_vph"]:
+            continue
+        lim = MAX_AGE_H.get(f.get("period"))
+        if lim and x.get("age_h") is not None and x["age_h"] > lim * 1.05:
+            continue
+        rng = LENGTH_RANGE.get(f.get("length"))
+        if rng and x.get("duration") and not rng[0] <= x["duration"] < rng[1] and not x["platform"].endswith("Shorts"):
+            continue
+        if excl and any(w in (x.get("title") or "").lower() for w in excl):
+            continue
+        if f.get("outliers") and not (x.get("outlier") or 0) >= 2:
+            continue
+        if f.get("min_hot") and x["hot"] < f["min_hot"]:
+            continue
+        out.append(x)
+    return sorted(out, key=SORT_KEYS.get(f.get("order", "hot"), SORT_KEYS["hot"]))
 
 
 def done_sources(output_root):
