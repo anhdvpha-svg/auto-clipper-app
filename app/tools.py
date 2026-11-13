@@ -87,6 +87,15 @@ def _sources():
     }
 
 
+def use_installed():
+    """Put already-downloaded tools on PATH without any download (editor opened right after start-up)."""
+    paths = _paths()
+    if os.path.exists(paths["ffmpeg"]):
+        os.environ["PATH"] = os.pathsep.join([os.path.dirname(paths["ffmpeg"]), tools_dir(),
+                                              os.environ.get("PATH", "")])
+    os.environ.setdefault("AUTOCLIPPER_FONTS", config.resource_path("assets", "fonts"))
+
+
 def ensure(log=print):
     """Make sure every tool exists; return their paths and put them on PATH for the engine."""
     paths = _paths()

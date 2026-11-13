@@ -106,6 +106,8 @@ class ClipEditor(ctk.CTkToplevel):
     def __init__(self, app, out_dir, index, on_saved):
         super().__init__(app)
         self.app, self.out_dir, self.index, self.on_saved = app, out_dir, index, on_saved
+        from . import tools
+        tools.use_installed()
         self.proj, data = load_project(out_dir)
         self.clip = json.loads(json.dumps(data["clips"][index]))
         self.rendered = data["rendered"][index]
