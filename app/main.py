@@ -11,7 +11,7 @@ from .links_ui import LinksMixin
 from .pipeline import Job, is_url
 
 APP_TITLE = "Auto Clipper"
-VERSION = "2.1"
+VERSION = "2.2"
 
 # ---- palette (dark, cyan accent - CapCut desktop feel) ----
 BG = "#0E0F12"

@@ -1,5 +1,5 @@
 """'Khám phá nguồn' page: find videos worth clipping, then queue them into the clipper."""
-import io, os, threading, webbrowser
+import io, os, threading, tkinter as tk
 
 import customtkinter as ctk
 
@@ -160,6 +160,8 @@ class ResearchMixin:
         self.rs_list = ctk.CTkFrame(wrap, fg_color="transparent")
         self.rs_list.grid(row=8, column=0, sticky="ew")
         self.rs_list.grid_columnconfigure(0, weight=1)
+        self._rs_lastcols = None
+        self.rs_list.bind("<Configure>", lambda _e: self._rs_resized())
         act = ctk.CTkFrame(wrap, fg_color="transparent")
         act.grid(row=9, column=0, sticky="ew", pady=(12, 0))
         act.grid_columnconfigure(0, weight=1)
@@ -168,7 +170,7 @@ class ResearchMixin:
         self.rs_queue_btn = self.button(act, "Thêm vào hàng chờ cắt clip", self._rs_queue_selected, primary=True,
                                         height=44, width=260)
         self.rs_queue_btn.grid(row=0, column=1)
-        self.rs_items, self.rs_raw, self.rs_checks, self._rs_imgs = [], [], {}, {}
+        self.rs_items, self.rs_raw, self.rs_checks, self._rs_imgs, self.rs_page = [], [], {}, {}, 0
         self._rs_switch()
         self._rs_render()
 
@@ -339,6 +341,12 @@ class ResearchMixin:
                 self._prefetch(x["url"])
             self.notify("Khám phá nguồn xong", f"{len(self.rs_items)} video cho {what}"
                         + (f" · {len(errors)} nền tảng lỗi" if errors else ""), ok=not (errors and not items))
+        elif kind == "rs_thumb_raw":
+            key, im, item = data
+            img = self._rs_card_image(item or {"url": key}, im)
+            lbl = self._rs_thumb_labels.get(key)
+            if lbl is not None and lbl.winfo_exists():
+                lbl.configure(image=img)
         elif kind == "rs_thumb":
             key, img = data
             lbl = self._rs_thumb_labels.get(key)
@@ -347,80 +355,180 @@ class ResearchMixin:
                 lbl.configure(image=img, text="")
 
     # ---------- results ----------
-    def _rs_render(self):
+    # ---------- results: a grid of vertical cards, one page at a time ----------
+    TW, TH = 232, 130  # thumbnail size on a card
+
+    def _rs_cols(self):
+        w = self.rs_list.winfo_width()
+        if w < 50:
+            w = self.winfo_width() - 330
+        return max(3, min(6, w // 262))
+
+    def _rs_resized(self):
+        """Window resized: re-flow the cards when the number of columns changes."""
+        if getattr(self, "_rs_rjob", None):
+            self.after_cancel(self._rs_rjob)
+
+        def go():
+            self._rs_rjob = None
+            if self.rs_items and self._rs_cols() != self._rs_lastcols:
+                self._rs_render(keep_page=True)
+        self._rs_rjob = self.after(250, go)
+
+    def _rs_shown(self):
+        return [x for x in self.rs_items if not (self.rs_hide_done.get() and "Đã cắt" in x.get("tags", []))]
+
+    def _rs_go_page(self, d):
+        self.rs_page = max(0, self.rs_page + d)
+        self._rs_render(keep_page=True)
+        try:  # back to the top of the results
+            canvas = self.pages["research"]._parent_canvas
+            canvas.update_idletasks()
+            y = self.rs_head.winfo_rooty() - self.pages["research"].winfo_rooty()
+            total = max(1, self.pages["research"].winfo_height())
+            canvas.yview_moveto(max(0.0, y / total - 0.01))
+        except Exception:
+            pass
+
+    def _rs_render(self, keep_page=False):
         T = self.theme
         for w in self.rs_list.winfo_children():
             w.destroy()
         self._rs_thumb_labels = {}
-        items = [x for x in self.rs_items if not (self.rs_hide_done.get() and "Đã cắt" in x.get("tags", []))]
+        items = self._rs_shown()
         self.rs_head.configure(text=f"Kết quả · {len(items)} video" if self.rs_items else "")
+        if not keep_page:
+            self.rs_page = 0
         if not items:
             self.muted(self.rs_list, "Kết quả sẽ hiện ở đây." if not self.rs_items else "Không còn video nào.", 14
                        ).grid(row=0, column=0, sticky="w", pady=16)
             self._rs_upd_sel()
             return
-        for i, x in enumerate(items[:80]):
-            row = ctk.CTkFrame(self.rs_list, fg_color=T["CARD"], corner_radius=14, border_width=1,
-                               border_color=T["BORDER"])
-            row.grid(row=i, column=0, sticky="ew", pady=4)
-            row.grid_columnconfigure(3, weight=1)
-            # mouse over a result: start finding its stream now, so ▶ Xem opens at once
-            row.bind("<Enter>", lambda _e, u=x["url"]: self._prefetch(u))
-            var = self.rs_checks.get(x["url"]) or ctk.BooleanVar(value=False)
-            self.rs_checks[x["url"]] = var
-            ctk.CTkCheckBox(row, text="", variable=var, width=24, fg_color=T["ACCENT"], hover_color=T["ACCENT_HOVER"],
-                            command=self._rs_upd_sel).grid(row=0, column=0, rowspan=3, padx=(14, 6))
-            hot = ctk.CTkLabel(row, text=str(x["hot"]), width=46, height=46, corner_radius=12,
-                               fg_color=T["ACCENT"] if x["hot"] >= 70 else T["CARD2"],
-                               text_color="#03161A" if x["hot"] >= 70 else T["TEXT"], font=self.font(17, "bold"))
-            hot.grid(row=0, column=1, rowspan=3, padx=6)
-            th = ctk.CTkLabel(row, text="", width=160, height=90, fg_color=T["CARD2"], corner_radius=8, cursor="hand2")
-            th.grid(row=0, column=2, rowspan=3, padx=8, pady=10)
+        cols = self._rs_cols()
+        self._rs_lastcols = cols
+        per = cols * 3
+        pages = (len(items) + per - 1) // per
+        self.rs_page = min(self.rs_page, pages - 1)
+        for c in range(6):
+            self.rs_list.grid_columnconfigure(c, weight=1 if c < cols else 0, uniform="rs" if c < cols else "")
+        chunk = items[self.rs_page * per:(self.rs_page + 1) * per]
+        bg = T["CARD"]
+        for i, x in enumerate(chunk):
+            card = ctk.CTkFrame(self.rs_list, fg_color=bg, corner_radius=14, border_width=1, border_color=T["BORDER"])
+            card.grid(row=i // cols, column=i % cols, sticky="nsew", padx=5, pady=5)
+            card.grid_columnconfigure(0, weight=1)
+            card.bind("<Enter>", lambda _e, u=x["url"]: self._prefetch(u))
+            th = ctk.CTkLabel(card, text="", image=self._rs_card_image(x), cursor="hand2")
+            th.grid(row=0, column=0, padx=8, pady=(8, 4))
             th.bind("<Button-1>", lambda _e, x=x: self.open_player(x))
             self._rs_thumb_labels[x["url"]] = th
-            if x["url"] in self._rs_imgs:
-                th.configure(image=self._rs_imgs[x["url"]])
-            elif x.get("thumb"):
-                self._rs_load_thumb(x["url"], x["thumb"])
-            ctk.CTkLabel(row, text=x["title"], font=self.font(14, "bold"), text_color=T["TEXT"], anchor="w",
-                         justify="left", wraplength=560).grid(row=0, column=3, sticky="sw", pady=(10, 0))
-            vph = f"{research.human_views(x['velocity'])} view/giờ" if x.get("velocity") else ""
-            meta = " · ".join(v for v in (x["channel"], f"{research.human_views(x['views'])} view", vph,
-                                          research.human_dur(x["duration"]), research.human_age(x.get("age_h"))) if v)
-            mrow = ctk.CTkFrame(row, fg_color="transparent")
-            mrow.grid(row=1, column=3, sticky="w")
-            ctk.CTkLabel(mrow, text=x["platform"], font=self.font(10, "bold"), text_color="white", height=18,
-                         corner_radius=5, fg_color=PLAT_COLORS.get(x["platform"], T["CARD2"])).grid(row=0, column=0,
-                                                                                                   ipadx=5, padx=(0, 6))
-            self.muted(mrow, meta, 12).grid(row=0, column=1, sticky="w")
-            tags = ctk.CTkFrame(row, fg_color="transparent", height=4)
-            tags.grid(row=2, column=3, sticky="nw", pady=(2, 10))
-            for j, t in enumerate(x.get("tags", [])):
-                ctk.CTkLabel(tags, text=t, font=self.font(11, "bold"), text_color="white", corner_radius=6, height=20,
-                             fg_color=TAG_COLORS.get(t.split(" x")[0], T["CARD2"])).grid(row=0, column=j, padx=(0, 5), ipadx=6)
-            btns = ctk.CTkFrame(row, fg_color="transparent")
-            btns.grid(row=0, column=4, rowspan=3, padx=(6, 14))
-            self.button(btns, "▶ Xem", lambda x=x: self.open_player(x), width=90, height=30).grid(row=0, column=0,
-                                                                                                  pady=2)
-            sv = self.button(btns, "🔖 Lưu", None, width=90, height=30)
+            if x["url"] not in self._rs_imgs and x.get("thumb"):
+                self._rs_load_thumb(x["url"], x["thumb"], x)
+            top = tk.Frame(card, bg=bg)
+            top.grid(row=1, column=0, sticky="ew", padx=10)
+            top.grid_columnconfigure(1, weight=1)
+            var = self.rs_checks.get(x["url"]) or ctk.BooleanVar(value=False)
+            self.rs_checks[x["url"]] = var
+            ctk.CTkCheckBox(top, text="", variable=var, width=22, checkbox_width=20, checkbox_height=20,
+                            fg_color=T["ACCENT"], hover_color=T["ACCENT_HOVER"], bg_color=bg,
+                            command=self._rs_upd_sel).grid(row=0, column=0, sticky="nw", pady=(2, 0))
+            title = x["title"] if len(x["title"]) <= 90 else x["title"][:88].rstrip() + "…"
+            tk.Label(top, text=title, font=self._tkfont(12, "bold"), fg=T["TEXT"], bg=bg, anchor="nw", justify="left",
+                     wraplength=self.TW - 30, height=2).grid(row=0, column=1, sticky="nw")
+            vph = f"{research.human_views(x['velocity'])}/giờ" if x.get("velocity") else ""
+            meta = " · ".join(v for v in (f"{research.human_views(x['views'])} view", vph,
+                                          research.human_age(x.get("age_h"))) if v)
+            tk.Label(card, text=(x.get("channel") or "")[:34], font=self._tkfont(10), fg=T["MUTED"], bg=bg,
+                     anchor="w").grid(row=2, column=0, sticky="ew", padx=12)
+            tk.Label(card, text=meta, font=self._tkfont(10), fg=T["MUTED"], bg=bg, anchor="w").grid(
+                row=3, column=0, sticky="ew", padx=12)
+            tags = [t for t in x.get("tags", []) if t != "Dài"]
+            tk.Label(card, text="  ·  ".join(tags) if tags else " ", font=self._tkfont(10, "bold"),
+                     fg=TAG_COLORS.get(tags[0].split(" x")[0], T["MUTED"]) if tags else T["MUTED"], bg=bg,
+                     anchor="w").grid(row=4, column=0, sticky="ew", padx=12)
+            btns = tk.Frame(card, bg=bg)
+            btns.grid(row=5, column=0, sticky="ew", padx=8, pady=(4, 10))
+            btns.grid_columnconfigure((0, 1, 2), weight=1, uniform="b")
+            ctk.CTkButton(btns, text="▶ Xem", height=28, width=10, corner_radius=8, fg_color=T["CARD2"],
+                          hover_color=T["BORDER"], text_color=T["TEXT"], font=self.font(12), bg_color=bg,
+                          command=lambda x=x: self.open_player(x)).grid(row=0, column=0, sticky="ew", padx=2)
+            sv = ctk.CTkButton(btns, text="🔖 Lưu", height=28, width=10, corner_radius=8, fg_color=T["CARD2"],
+                               hover_color=T["BORDER"], text_color=T["TEXT"], font=self.font(12), bg_color=bg)
             sv.configure(command=lambda x=x, sv=sv: self.save_link_menu(x, sv))
-            sv.grid(row=1, column=0, pady=2)
-            self.button(btns, "Cắt ngay", lambda u=x["url"]: self.enqueue([u], front=True), primary=True, width=90,
-                        height=30).grid(row=2, column=0, pady=2)
+            sv.grid(row=0, column=1, sticky="ew", padx=2)
+            ctk.CTkButton(btns, text="Cắt", height=28, width=10, corner_radius=8, fg_color=T["ACCENT"],
+                          hover_color=T["ACCENT_HOVER"], text_color="#03161A", font=self.font(12, "bold"),
+                          bg_color=bg, command=lambda u=x["url"]: self.enqueue([u], front=True)).grid(
+                row=0, column=2, sticky="ew", padx=2)
+        if pages > 1:
+            pg = tk.Frame(self.rs_list, bg=T["BG"])
+            pg.grid(row=99, column=0, columnspan=cols, pady=(10, 0))
+            self.button(pg, "‹ Trang trước", lambda: self._rs_go_page(-1), height=34, width=120,
+                        state="normal" if self.rs_page > 0 else "disabled").grid(row=0, column=0, padx=6)
+            tk.Label(pg, text=f"Trang {self.rs_page + 1}/{pages}", font=self._tkfont(12, "bold"), fg=T["TEXT"],
+                     bg=T["BG"]).grid(row=0, column=1, padx=10)
+            self.button(pg, "Trang sau ›", lambda: self._rs_go_page(1), height=34, width=120,
+                        state="normal" if self.rs_page < pages - 1 else "disabled").grid(row=0, column=2, padx=6)
+            self.rs_head.configure(text=f"Kết quả · {len(items)} video · trang {self.rs_page + 1}/{pages}")
         self._rs_upd_sel()
+
+    def _tkfont(self, size, weight="normal"):
+        """Plain Tk font (cards use light Tk labels: far faster to draw and scroll than canvas widgets)."""
+        key = (size, weight)
+        cache = self.__dict__.setdefault("_tkfonts", {})
+        if key not in cache:
+            import tkinter.font as tkfont
+            fam = getattr(self, "F", None) or "Segoe UI"
+            cache[key] = tkfont.Font(family=fam, size=-int(size * 1.34), weight=weight)
+        return cache[key]
+
+    def _rs_card_image(self, x, im=None):
+        """Thumbnail with the Hot score, platform and length drawn on it (one image instead of 3 widgets)."""
+        key = x["url"]
+        if im is None and key in self._rs_imgs:
+            return self._rs_imgs[key]
+        from PIL import Image, ImageDraw, ImageFont
+        W2, H2 = self.TW * 2, self.TH * 2
+        base = im.copy() if im is not None else Image.new("RGB", (W2, H2), (38, 40, 48))
+        d = ImageDraw.Draw(base, "RGBA")
+        fd = os.environ.get("AUTOCLIPPER_FONTS") or config.resource_path("assets", "fonts")
+        try:
+            f_big = ImageFont.truetype(os.path.join(fd, "Inter-ExtraBold.otf"), 34)
+            f_small = ImageFont.truetype(os.path.join(fd, "Inter-ExtraBold.otf"), 22)
+        except Exception:
+            f_big = f_small = ImageFont.load_default()
+        hot = str(x.get("hot", ""))
+        hot_bg = (34, 211, 238, 255) if x.get("hot", 0) >= 70 else (15, 16, 20, 215)
+        d.rounded_rectangle([10, 10, 10 + 26 + 22 * len(hot), 58], radius=12, fill=hot_bg)
+        d.text((23, 14), hot, font=f_big, fill=(3, 22, 26) if x.get("hot", 0) >= 70 else (240, 240, 240))
+        plat = x.get("platform", "")
+        col = PLAT_COLORS.get(plat, "#334155").lstrip("#")
+        rgb = tuple(int(col[i:i + 2], 16) for i in (0, 2, 4))
+        pw = int(d.textlength(plat, font=f_small)) + 20
+        d.rounded_rectangle([10, H2 - 44, 10 + pw, H2 - 10], radius=8, fill=rgb + (235,))
+        d.text((20, H2 - 41), plat, font=f_small, fill=(255, 255, 255))
+        dur = research.human_dur(x.get("duration"))
+        if dur:
+            dw = int(d.textlength(dur, font=f_small)) + 18
+            d.rounded_rectangle([W2 - 10 - dw, H2 - 44, W2 - 10, H2 - 10], radius=8, fill=(0, 0, 0, 200))
+            d.text((W2 - 10 - dw + 9, H2 - 41), dur, font=f_small, fill=(255, 255, 255))
+        img = ctk.CTkImage(base, base, size=(self.TW, self.TH))
+        if im is not None:
+            self._rs_imgs[key] = img
+        return img
 
     def _prefetch(self, url):
         from . import player
         player.prefetch(url, self.cfg)
 
-    def _rs_load_thumb(self, key, url):
+    def _rs_load_thumb(self, key, url, item=None):
         def work():
             try:
                 import httpx
                 from PIL import Image, ImageOps
                 r = httpx.get(url, timeout=15, follow_redirects=True)
-                im = ImageOps.fit(Image.open(io.BytesIO(r.content)).convert("RGB"), (320, 180))
-                self.q.put(("rs_thumb", (key, ctk.CTkImage(im, im, size=(160, 90)))))
+                im = ImageOps.fit(Image.open(io.BytesIO(r.content)).convert("RGB"), (self.TW * 2, self.TH * 2))
+                self.q.put(("rs_thumb_raw", (key, im, item)))
             except Exception:
                 pass
         threading.Thread(target=work, daemon=True).start()
