@@ -528,7 +528,7 @@ class ClipEditor(ctk.CTkToplevel):
         self.cap_list = ctk.CTkScrollableFrame(t, fg_color=T["CARD2"], corner_radius=10, height=150)
         self.cap_list.grid(row=9, column=0, columnspan=2, sticky="nsew", padx=16, pady=(0, 12))
         self.cap_list.grid_columnconfigure(1, weight=1)
-        self._fill_caps(self.clip.get("captions_override") or default_chunks(self.rendered, self.words))
+        self._fill_caps(self.clip.get("captions_override") or self._auto_chunks())
 
     def _pick_preset(self, k, refresh=True):
         self.preset = k if k in render_clips.CAPTION_PRESETS else "classic"
@@ -571,9 +571,15 @@ class ClipEditor(ctk.CTkToplevel):
         self.t_lbl.configure(text=_fmt(t))
         self.refresh()
 
+    def _auto_chunks(self):
+        """The captions a reset goes back to: the localized lines for a market version, else the speech."""
+        return self.clip.get("captions_localized") or default_chunks(self.rendered, self.words)
+
     def _reset_caps(self):
         self.clip.pop("captions_override", None)
-        self._fill_caps(default_chunks(self.rendered, self.words))
+        if self.clip.get("captions_localized"):
+            self.clip["captions_override"] = self.clip["captions_localized"]
+        self._fill_caps(self._auto_chunks())
         self.refresh()
 
     # ---------- hook ----------
@@ -752,12 +758,13 @@ class ClipEditor(ctk.CTkToplevel):
         timing_changed = abs(s - float(self.clip.get("start", s))) > 0.05 or abs(e - float(self.clip.get("end", e))) > 0.05
         c.pop("ranges", None)
         c["start"], c["end"] = s, e
-        if timing_changed or jc_changed:
+        localized = c.get("captions_localized")
+        if (timing_changed or jc_changed) and not localized:
             c.pop("captions_override", None)
         elif self.cap_rows:
-            edited = [{"s": ch["s"], "e": ch["e"], "text": ent.get().strip()} for ch, ent in self.cap_rows]
-            auto = default_chunks(self.rendered, self.words)
-            if [x["text"] for x in edited] != [x["text"] for x in auto]:
+            edited = [dict(ch, text=ent.get().strip()) for ch, ent in self.cap_rows]
+            auto = self._auto_chunks()
+            if [x["text"] for x in edited] != [x["text"] for x in auto] or localized:
                 c["captions_override"] = edited
             else:
                 c.pop("captions_override", None)

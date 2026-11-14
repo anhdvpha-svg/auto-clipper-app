@@ -3,7 +3,7 @@ import contextlib, datetime, glob, io, json, os, re, shutil, sys, threading
 
 import numpy as np
 
-from . import config, llm, offline, tools
+from . import markets, config, llm, offline, tools
 from .downloader import Downloader, DownloadError
 from .engine import analyze_video, fetch_video, render_clips, transcribe
 
@@ -43,6 +43,13 @@ def strip_tags(text):
     if i > 15:
         text = text[:i].rstrip(" ,.-|")
     return text
+
+
+def _srt_time(t):
+    t = max(0.0, float(t))
+    h, r = divmod(t, 3600)
+    m, sec = divmod(r, 60)
+    return f"{int(h):02d}:{int(m):02d}:{sec:06.3f}".replace(".", ",")
 
 
 def safe_name(text, maxlen=60):
@@ -351,8 +358,16 @@ class Job:
             json.dump({"shots": merged, "active_area": active}, open(shots_path, "w"))
 
         # 6. render
-        self.progress(0.65, f"Đang dựng {len(clips)} clip...")
         spec = [self._to_spec(c) for c in clips]
+        for i, c in enumerate(spec):
+            c["group"] = i
+        chosen = [m for m in cfg.get("markets") or [] if m in markets.MARKETS]
+        src_lang = transcript.get("language") or info.get("language")
+        if chosen:
+            self.progress(0.62, "Đang bản địa hoá cho thị trường mục tiêu...")
+            jumpcut = cfg.get("jumpcut", True) and mode == "talk"
+            spec = self._localize(spec, chosen, src_lang, transcript, duration, jumpcut, provider, log)
+        self.progress(0.65, f"Đang dựng {len(spec)} clip...")
         clips_path = os.path.join(work, "clips.json")
         json.dump({"clips": spec}, open(clips_path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
         argv = ["--video", video, "--clips", clips_path, "--out-dir", out, "--encoder", cfg.get("encoder", "auto"),
@@ -395,9 +410,125 @@ class Job:
         rendered = json.load(open(os.path.join(out, "clips_rendered.json"), encoding="utf-8"))["rendered"]
         results = [{**c, "index": k, "file": os.path.join(out, r["file"]), "thumb": os.path.join(out, r["thumb"]),
                     "length": r["length"]} for k, (c, r) in enumerate(zip(spec, rendered))]
+        self._market_files(out, spec, rendered, transcript, src_lang, chosen)
         self.progress(1.0, "Xong!")
         log(f"Xong! {len(results)} clip trong: {out}")
-        return {"out_dir": out, "clips": results, "work_dir": work, "note": self.count_note}
+        return {"out_dir": out, "clips": results, "work_dir": work, "note": self.count_note, "markets": chosen}
+
+    # ------------------------------------------------------------------
+    def _localize(self, spec, chosen, src_lang, transcript, duration, jumpcut, provider, log):
+        """One extra version of every clip per target market: subtitles, hook, post copy and hashtags written
+        for that country by the AI (adapted, not word-for-word). Without AI only the posting plan is produced."""
+        cfg = self.cfg
+        words = render_clips.all_words(transcript)
+        payload = []
+        for c in spec:
+            ranges = render_clips.clip_ranges(c, words, duration)
+            if jumpcut and words:
+                ranges = render_clips.jumpcut_ranges(ranges, words)
+            cw, _ = render_clips.clip_words_of([tuple(r) for r in ranges], words)
+            lines = [{"s": round(ch[0]["s"], 3), "e": round(ch[-1]["e"], 3), "text": " ".join(w["w"] for w in ch)}
+                     for ch in render_clips.chunk_words(cw, 10, max_chars=60, max_gap=0.8)]
+            payload.append({"id": c["group"], "title": c["title"], "hook_title": c.get("hook_title", ""),
+                            "captions": c.get("captions", {}), "hashtags": c.get("hashtags", []), "lines": lines})
+        if provider == "offline":
+            log("Bản địa hoá phụ đề/caption cần AI (Claude/ChatGPT/Gemini/API): chế độ Offline chỉ tạo lịch đăng "
+                "theo giờ từng thị trường trong report.md.")
+            self.count_note = (self.count_note + " " if self.count_note else "") + \
+                "Bản địa hoá cần AI; Offline chỉ có lịch đăng theo thị trường (xem report.md)."
+            return spec
+        model, key = cfg["models"].get(provider), config.get_key(cfg, provider)
+        base = (cfg.get("base_urls") or {}).get(provider)
+        out = list(spec) if cfg.get("keep_original", True) else []
+        made = 0
+        for mk in chosen:
+            M = markets.MARKETS[mk]
+            try:
+                res = llm.localize(provider, model, key, M, src_lang, payload, base=base, log=log)
+            except Exception as e:
+                log(f"Không bản địa hoá được cho {M['label']}: {e}")
+                continue
+            for c, pl in zip(spec, payload):
+                r = res.get(c["group"])
+                if not r:
+                    continue
+                v = json.loads(json.dumps(c))
+                v.update(market=mk, market_label=M["label"], lang=M["lang"],
+                         title=(r.get("title") or c["title"]).strip(),
+                         captions={"TikTok": strip_tags(r.get("caption_tiktok", "")),
+                                   "Instagram Reels": strip_tags(r.get("caption_reels", "")),
+                                   "YouTube Shorts": strip_tags(r.get("caption_shorts", ""))},
+                         hashtags=tidy_hashtags(r.get("hashtags")), search_keywords=r.get("search_keywords") or [],
+                         youtube={"title": r.get("youtube_title", ""), "description": r.get("youtube_description", "")})
+                if c.get("hook_title") and r.get("hook_title"):
+                    v["hook_title"] = r["hook_title"].strip()
+                same = markets.same_language(M["lang"], src_lang)
+                if same and cfg.get("keep_original", True):
+                    # same language as the video: no second render, the original just gets this market's copy
+                    orig = next((x for x in out if x is c), None)
+                    if orig is not None:
+                        orig.update({k: v[k] for k in ("market", "market_label", "lang", "captions", "hashtags",
+                                                        "search_keywords", "youtube")})
+                        made += 1
+                    continue
+                if not same:
+                    chunks = [{"s": x["s"], "e": x["e"], "text": t} for x, t in zip(pl["lines"], r["lines"])]
+                    if cfg.get("bilingual"):
+                        for ch, x in zip(chunks, pl["lines"]):
+                            ch["sub"] = x["text"]
+                    v["captions_override"] = chunks
+                    v["captions_localized"] = chunks
+                out.append(v)
+                made += 1
+            self._check()
+        if not out:
+            out = list(spec)
+        log(f"Đã bản địa hoá {made} bản clip cho {len(chosen)} thị trường.")
+        return out
+
+    def _market_files(self, out, spec, rendered, transcript, src_lang, chosen):
+        """Subtitles (.srt) per version for YouTube, title/description translations, posting plan + checklist."""
+        words = render_clips.all_words(transcript)
+        sub_dir = os.path.join(out, "phu_de")
+        yt = {}
+        for c, r in zip(spec, rendered):
+            if c.get("captions_override"):
+                chunks = c["captions_override"]
+            else:
+                cw, _ = render_clips.clip_words_of([tuple(x) for x in (r.get("pieces") or r["ranges"])], words)
+                chunks = [{"s": ch[0]["s"], "e": ch[-1]["e"], "text": " ".join(w["w"] for w in ch)}
+                          for ch in render_clips.chunk_words(cw, 10, max_chars=60, max_gap=0.8)]
+            if chunks:
+                os.makedirs(sub_dir, exist_ok=True)
+                lang = c.get("lang") or src_lang or "und"
+                name = os.path.splitext(r["file"])[0] + f".{lang}.srt"
+                with open(os.path.join(sub_dir, name), "w", encoding="utf-8") as f:
+                    for i, ch in enumerate(chunks, 1):
+                        f.write(f"{i}\n{_srt_time(ch['s'])} --> {_srt_time(ch['e'])}\n{ch['text']}\n\n")
+            if c.get("youtube"):
+                yt.setdefault(c["group"], []).append((c, c["youtube"]))
+        if yt:
+            L = ["Dán vào YouTube Studio → Phụ đề → Thêm ngôn ngữ → Tiêu đề & mô tả, cho từng video.", ""]
+            for g, items in yt.items():
+                orig = next((c for c in spec if c["group"] == g and not c.get("market")), None)
+                L += ["=" * 60, f"Clip {g + 1}: {(orig or items[0][0])['title']}", "=" * 60]
+                for c, y in items:
+                    L += ["", f"[{c['market_label']} · {c['lang']}]", f"Tiêu đề: {y['title']}",
+                          f"Mô tả: {y['description']}"]
+                    if c.get("search_keywords"):
+                        L.append("Từ khoá tìm kiếm: " + ", ".join(c["search_keywords"]))
+                L.append("")
+            open(os.path.join(out, "youtube_localizations.txt"), "w", encoding="utf-8").write("\n".join(L))
+        if chosen:
+            rep = os.path.join(out, "report.md")
+            with open(rep, "a", encoding="utf-8") as f:
+                f.write("\n\n## Phân phối theo thị trường mục tiêu (organic)\n\n"
+                        "Lịch đăng gợi ý: khung giờ cao điểm theo giờ địa phương, đổi sang giờ máy của bạn. Sau 2–3 tuần "
+                        "hãy theo giờ người xem hoạt động trong mục Thống kê của chính tài khoản.\n")
+                f.write(markets.plan_text(chosen))
+                f.write("\n\n### Tín hiệu giúp nền tảng đưa video tới đúng thị trường\n")
+                f.write(markets.checklist_text() + "\n")
+
 
     # ------------------------------------------------------------------
     def _ai_framing(self, video, shots, active, clips, provider, log, work):

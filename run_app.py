@@ -139,6 +139,14 @@ def selftest(out_dir):
             log(f"login window check: exit {r.returncode}")
         except Exception as e:
             log(f"login window check (non-fatal): {e}")
+        # target markets: time zones must be bundled (tzdata) and bilingual captions must build
+        from app import markets
+        assert markets.posting_plan("us") and markets.posting_plan("br"), "time zone data missing"
+        from app.engine import render_clips as _rc
+        ass = _rc.build_ass([], 1080, 1920, 4, None, None, preset="hormozi",
+                            chunks=[{"s": 0, "e": 2, "text": "My costliest lesson", "sub": "Bài học đắt giá"}])
+        assert "Sub,," in ass, "bilingual line missing"
+        log("markets ok: " + markets.posting_plan("us")[0][1][1][1])
         # Whisper must work in the frozen app (model download + our ffmpeg decoder + ctranslate2)
         from app.engine import transcribe
         wd = os.path.join(out_dir, "whisper")

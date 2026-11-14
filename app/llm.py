@@ -467,3 +467,93 @@ def frame_shots(provider, model, key, sheet_path, ids, base=None):
         except (TypeError, ValueError, KeyError):
             continue
     return out
+
+
+# ---------------- localization (target markets) ----------------
+
+LOCALIZE_SYSTEM = """You localize short vertical videos (TikTok, Reels, Shorts) for a specific country so they reach
+and convince viewers THERE organically. You are a native creator of that market, not a translator.
+For every clip you receive the on-screen hook, the post copy and the subtitle lines (in order, with times).
+- lines: one output line per input line, same count and order. Natural spoken subtitles a native would write;
+  keep each line about as short as the original (it is shown for the same seconds). Keep names, brands, numbers.
+  Convert money/units the viewer would not understand by adding the local equivalent, e.g.
+  "800 triệu" -> "800M VND (~$32K)". Never add claims the speaker did not make.
+- hook_title: <= 8 words, punchy, in the market's language and humour; not a literal translation.
+- caption_tiktok: FIRST LINE = the search phrase people in that market actually type (TikTok/Reels search SEO),
+  then 1 short line of value or curiosity. caption_reels: hook line + 1-3 lines + soft CTA. caption_shorts:
+  searchable title-like line <= 70 chars. youtube_title (<= 70 chars) and youtube_description (2-4 lines) for
+  YouTube's title/description translation.
+- hashtags: 3-6 that natives in THAT country follow: 1 broad topic tag, 2-3 niche tags in the market's language,
+  optionally 1 community/geo tag used there. No #fyp/#viral spam, no tags in the source language.
+- search_keywords: 3-5 phrases natives type into search for this topic.
+- If the market speaks the source language, keep the lines as they are (copy them) and only adapt the copy,
+  hashtags and keywords to that country. Answer with JSON only."""
+
+LOCALIZE_SCHEMA = {
+    "type": "object",
+    "properties": {"clips": {"type": "array", "items": {
+        "type": "object",
+        "properties": {"id": {"type": "integer"}, "hook_title": {"type": "string"}, "title": {"type": "string"},
+                       "caption_tiktok": {"type": "string"}, "caption_reels": {"type": "string"},
+                       "caption_shorts": {"type": "string"}, "youtube_title": {"type": "string"},
+                       "youtube_description": {"type": "string"},
+                       "hashtags": {"type": "array", "items": {"type": "string"}},
+                       "search_keywords": {"type": "array", "items": {"type": "string"}},
+                       "lines": {"type": "array", "items": {"type": "string"}}},
+        "required": ["id", "hook_title", "title", "caption_tiktok", "caption_reels", "caption_shorts",
+                     "youtube_title", "youtube_description", "hashtags", "search_keywords", "lines"],
+        "additionalProperties": False}},
+        "notes": {"type": "string"}},
+    "required": ["clips", "notes"], "additionalProperties": False,
+}
+
+LOCALIZE_TASK = {"system": LOCALIZE_SYSTEM, "schema": LOCALIZE_SCHEMA,
+                 "shape": 'Return exactly: {"clips": [{"id": int, "hook_title": str, "title": str, "caption_tiktok": '
+                          'str, "caption_reels": str, "caption_shorts": str, "youtube_title": str, '
+                          '"youtube_description": str, "hashtags": [str], "search_keywords": [str], "lines": [str]}], '
+                          '"notes": str}'}
+
+
+def localize(provider, model, key, market, source_lang, clips, base=None, log=print):
+    """clips: [{"id", "title", "hook_title", "captions": {...}, "hashtags", "lines": [{"s","e","text"}]}]
+    market: markets.MARKETS entry. Returns {id: localized dict} with exactly len(lines) lines per clip."""
+    if not key or not model:
+        raise AIError("Bản địa hoá cần AI: chọn Claude/ChatGPT/Gemini/API tuỳ chỉnh và nhập API key.")
+    out = {}
+    batch, size = [], 0
+    batches = []
+    for c in clips:  # keep requests a reasonable size
+        n = sum(len(x["text"]) for x in c["lines"]) + 600
+        if batch and size + n > 24000:
+            batches.append(batch)
+            batch, size = [], 0
+        batch.append(c)
+        size += n
+    if batch:
+        batches.append(batch)
+    for b in batches:
+        payload = [{"id": c["id"], "title": c.get("title", ""), "hook_title": c.get("hook_title", ""),
+                    "captions": c.get("captions", {}), "hashtags": c.get("hashtags", []),
+                    "lines": [f"[{_fmt(x['s'])}-{_fmt(x['e'])}] {x['text']}" for x in c["lines"]]} for c in b]
+        text = (f"Target market: {market['country']}. Write in: {market['lang_name']}. "
+                f"Source language of the video: {source_lang or 'unknown'}.\n"
+                f"Return the subtitle lines WITHOUT the [time] prefixes.\n\n"
+                + json.dumps(payload, ensure_ascii=False))
+        log(f"AI đang bản địa hoá {len(b)} clip cho {market['label']}...")
+        args = (key, model, text, [])
+        data = _CALL[provider](*args, base=base, task=LOCALIZE_TASK) if provider == "custom" else \
+            _CALL[provider](*args, task=LOCALIZE_TASK)
+        for item in data.get("clips") or []:
+            try:
+                cid = int(item["id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            src = next((c for c in b if c["id"] == cid), None)
+            if not src:
+                continue
+            lines = [str(x).strip() for x in item.get("lines") or []]
+            n = len(src["lines"])
+            lines = (lines + [x["text"] for x in src["lines"][len(lines):]])[:n]  # same count, whatever happens
+            item["lines"] = [__import__("re").sub(r"^\[[\d:.\-– ]+\]\s*", "", x) for x in lines]
+            out[cid] = item
+    return out

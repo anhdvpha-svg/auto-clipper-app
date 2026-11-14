@@ -35,7 +35,7 @@ args = [
 ]
 if sys.platform == "win32":
     args += ["--collect-all", "pythonnet", "--collect-all", "clr_loader", "--hidden-import", "clr",
-             "--collect-all", "_sounddevice_data"]
+             "--collect-all", "_sounddevice_data", "--collect-data", "tzdata"]
 if sys.platform == "darwin":
     args += ["--osx-bundle-identifier", "app.autoclipper"]
 

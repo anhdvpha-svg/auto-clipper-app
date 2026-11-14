@@ -151,7 +151,10 @@ def _ass_col(rrggbb, alpha=0):
 
 def caption_preset(name):
     p = dict(CAPTION_PRESETS["classic"])
-    p.update(CAPTION_PRESETS.get(name or "classic", {}))
+    own = CAPTION_PRESETS.get(name or "classic", {})
+    if "bold" not in own:
+        p.pop("bold", None)  # single-weight display fonts: no faux bold
+    p.update(own)
     return p
 
 
@@ -171,6 +174,8 @@ def build_ass(words, W, H, max_words, highlight_rrggbb, uppercase, size=1.0, y=0
     style_border = 3 if P.get("boxed") else 1
     outline_col = _ass_col(P.get("back") or P["outline"])  # boxed: opaque, or overlapping glyph boxes show seams
     primary, secondary = (hl, base) if P["mode"] == "karaoke" else (base, base)
+    sub_fs = max(24, int(W * 0.036 * size))           # second-language line under the captions (bilingual)
+    sub_margin = max(20, margin_v - int(sub_fs * 1.5))
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {W}
@@ -181,15 +186,20 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Cap,{P["font"]},{fs},{primary},{secondary},{outline_col},&H80000000,{-1 if P.get("bold") else 0},0,0,0,100,100,{P.get("spacing", 0)},0,{style_border},{bord},{P["shadow"]},2,60,60,{margin_v},1
+Style: Sub,Inter,{sub_fs},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,{max(2, sub_fs // 10)},1,2,90,90,{sub_margin},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     max_words = P.get("words", max_words) if max_words == 4 else max_words
+    max_chars = 22 if max_words <= 4 else 34
+    subs = []  # (start, end, text) of second-language lines
     if chunks is not None:
         groups = []
         for c in chunks:
             toks = (c.get("text") or "").split()
+            if c.get("sub") and c["e"] > c["s"]:
+                subs.append((c["s"], c["e"], c["sub"]))
             if not toks or c["e"] <= c["s"]:
                 continue
             total = sum(len(t) + 1 for t in toks)
@@ -198,9 +208,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 d = (c["e"] - c["s"]) * (len(t) + 1) / total
                 g.append({"w": t, "s": cur, "e": cur + d})
                 cur += d
-            groups.append(g)
+            # long lines (translations, edits) are shown a few words at a time, like the automatic captions
+            groups += chunk_words(g, max_words, max_chars=max_chars, max_gap=99)
     else:
-        groups = chunk_words(words, max_words, max_chars=22 if max_words <= 4 else 34)
+        groups = chunk_words(words, max_words, max_chars=max_chars)
     blur = f"{{\\blur{P['blur']}}}" if P.get("blur") else ""
     ink = _ass_col(P.get("ink", "000000"))
     lines = []
@@ -244,6 +255,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     parts.append(t)
             pop = "{\\fscx86\\fscy86\\t(0,90,\\fscx100\\fscy100)}" if i == 0 and P["anim"] == "pop" else ""
             lines.append(f"Dialogue: 0,{ass_time(st)},{ass_time(en)},Cap,,0,0,0,,{blur}{pop}{' '.join(parts)}")
+    for a0, b0, t in subs:
+        lines.append(f"Dialogue: 1,{ass_time(a0)},{ass_time(b0)},Sub,,0,0,0,,{{\\q0}}{ass_escape(t)}")
     return header + "\n".join(lines) + "\n"
 
 
@@ -670,7 +683,8 @@ def render_clip(idx, clip, a, src, words, duration, shots, act):
         fx = {"level": fx_level, "bpm": info["bpm"], "music": info["music"], "events": len(events),
               "punches": sum(e["type"] == "punch" for e in events)}
 
-    slug = f"clip_{idx:02d}_{slugify(clip.get('title', ''))}"
+    tag = slugify(clip.get("market") or "", 8) if clip.get("market") else ""
+    slug = f"clip_{idx:02d}{'_' + tag if tag else ''}_{slugify(clip.get('title', ''))}"
     cs = clip.get("caption_style") or {}
     chunks = clip.get("captions_override")
     show_caps = cs.get("enabled", not a.no_captions) and (clip_words or chunks)

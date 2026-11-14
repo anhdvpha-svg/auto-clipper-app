@@ -34,6 +34,23 @@ Lần chạy đầu, app tự tải các công cụ cần thiết (yt-dlp, ffmpe
 
 API key được mã hoá bằng Windows DPAPI (gắn với tài khoản Windows của bạn) và chỉ gửi tới nhà cung cấp AI bạn chọn.
 
+## Thị trường mục tiêu (bản địa hoá, phân phối organic)
+
+Nền tảng chọn người xem dựa trên ngôn ngữ nói/phụ đề/chữ trên video, caption và từ khoá, hashtag, giờ đăng, khu vực
+của tài khoản và vị trí gắn kèm. Ở trang Tạo clip, chọn nước muốn nhắm tới (Mỹ, Anh, Úc, Philippines, Ấn Độ,
+Indonesia, Malaysia, Brazil, Mexico/Mỹ Latinh, Tây Ban Nha, Pháp, Đức, Việt Nam). Với AI, mỗi clip có thêm 1 bản cho
+mỗi nước:
+
+- Phụ đề viết lại bằng tiếng bản địa (giữ đúng thời gian; đổi tiền tệ/đơn vị sang thứ người xem hiểu), tuỳ chọn
+  **song ngữ** (dòng gốc nhỏ bên dưới).
+- Tiêu đề hook, caption TikTok/Reels/Shorts, hashtag người bản địa theo dõi, từ khoá tìm kiếm (dòng đầu caption).
+- File phụ đề `.srt` từng ngôn ngữ (`phu_de/`) và `youtube_localizations.txt` (tiêu đề/mô tả dịch cho YouTube Studio).
+- **Lịch đăng** theo giờ cao điểm của từng nước, đổi sang giờ máy của bạn, và checklist tín hiệu phân phối trong
+  `report.md`.
+
+Lưu ý: TikTok phân phối trước hết tới khu vực của tài khoản; nên dùng tài khoản riêng đang hoạt động ở thị trường đó.
+App không giả lập vị trí.
+
 ## Khám phá nguồn (tìm video để clip)
 
 - **Chọn nền tảng để quét**: YouTube video dài, YouTube Shorts, TikTok, Instagram Reels, Twitch, Kick, Dailymotion,

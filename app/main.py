@@ -5,12 +5,13 @@ import customtkinter as ctk
 
 from . import config, llm
 from .engine.render_clips import CAPTION_PRESETS
+from .markets import MARKETS
 from .research_ui import ResearchMixin
 from .links_ui import LinksMixin
 from .pipeline import Job, is_url
 
 APP_TITLE = "Auto Clipper"
-VERSION = "1.9"
+VERSION = "2.0"
 
 # ---- palette (dark, cyan accent - CapCut desktop feel) ----
 BG = "#0E0F12"
@@ -313,6 +314,26 @@ class App(ResearchMixin, LinksMixin, ctk.CTk):
                           "giữ người xem tới hết.", 12, wraplength=760).grid(row=1, column=0, columnspan=9, sticky="w",
                                                                               pady=(4, 0))
         row(4, 0, "Nhịp dựng giữ chân người xem", fxbox, span=2)
+
+        mk = ctk.CTkFrame(opt, fg_color="transparent")
+        self.mk_sel = [m for m in self.cfg.get("markets") or [] if m in MARKETS]
+        self.mk_btn = {}
+        for i, (k, m) in enumerate(MARKETS.items()):
+            b = ctk.CTkButton(mk, text=m["label"], height=28, width=112, corner_radius=14, font=self.font(12, "bold"),
+                              border_width=1, command=lambda k=k: self._toggle_market(k))
+            b.grid(row=i // 7, column=i % 7, padx=(0, 6), pady=3, sticky="w")
+            self.mk_btn[k] = b
+        mko = ctk.CTkFrame(mk, fg_color="transparent")
+        mko.grid(row=2, column=0, columnspan=7, sticky="w", pady=(4, 0))
+        self.mk_keep = self._switch(mko, "Giữ bản gốc", self.cfg.get("keep_original", True), 6)
+        self.mk_bi = self._switch(mko, "Phụ đề song ngữ (bản dịch + dòng gốc nhỏ bên dưới)",
+                                  self.cfg.get("bilingual", False), 7)
+        self.mk_keep.grid(row=0, column=0, padx=(0, 22))
+        self.mk_bi.grid(row=0, column=1, padx=(0, 22))
+        self.mk_hint = self.muted(mk, "", 12, wraplength=860)
+        self.mk_hint.grid(row=3, column=0, columnspan=7, sticky="w", pady=(4, 0))
+        row(5, 0, "Thị trường mục tiêu (bản địa hoá để phân phối organic đúng nước)", mk, span=2)
+        self._toggle_market(None)
         self.hint = self.muted(opt, "", 12)
         self.hint.grid(row=12, column=0, columnspan=2, sticky="w", padx=18, pady=(2, 14))
         self._provider_hint()
@@ -389,6 +410,25 @@ class App(ResearchMixin, LinksMixin, ctk.CTk):
         self.color = c
         for k, b in self.swatches.items():
             b.configure(border_color=TEXT if k == c else CARD)
+
+    def _toggle_market(self, key):
+        if key:
+            if key in self.mk_sel:
+                self.mk_sel.remove(key)
+            else:
+                self.mk_sel.append(key)
+        for k, b in self.mk_btn.items():
+            on = k in self.mk_sel
+            b.configure(fg_color=ACCENT if on else CARD2, hover_color=ACCENT_HOVER if on else BORDER,
+                        text_color=ACCENT_TEXT if on else TEXT, border_color=ACCENT if on else BORDER)
+        if not self.mk_sel:
+            t = ("Không chọn = giữ ngôn ngữ của video. Chọn nước muốn nhắm tới: mỗi clip có thêm 1 bản cho mỗi nước với "
+                 "phụ đề, tiêu đề hook, caption, hashtag và từ khoá tìm kiếm viết lại bằng tiếng bản địa, kèm lịch "
+                 "đăng theo giờ nước đó.")
+        else:
+            names = ", ".join(MARKETS[k]["label"] for k in self.mk_sel)
+            t = f"Sẽ bản địa hoá cho: {names}. Cần AI (Claude/ChatGPT/Gemini/API) để dịch; Offline chỉ tạo lịch đăng."
+        self.mk_hint.configure(text=t)
 
     def _preset_preview(self):
         key = self.preset_names.get(self.preset.get(), "classic")
@@ -480,7 +520,7 @@ class App(ResearchMixin, LinksMixin, ctk.CTk):
         cols = 4
         for c in range(cols):
             grid.grid_columnconfigure(c, weight=1, uniform="clips")
-        clips = sorted(res["clips"], key=lambda c: -c["score"]["total"])
+        clips = sorted(res["clips"], key=lambda c: (-c["score"]["total"], c.get("group", 0), bool(c.get("market"))))
         for i, c in enumerate(clips):
             card = ctk.CTkFrame(grid, fg_color=CARD, corner_radius=16, border_width=1, border_color=BORDER)
             card.grid(row=i // cols, column=i % cols, sticky="nsew", padx=6, pady=6)
@@ -489,8 +529,14 @@ class App(ResearchMixin, LinksMixin, ctk.CTk):
             pic = ctk.CTkButton(card, image=img, text="", fg_color="transparent", hover_color=CARD2,
                                 command=lambda p=c["file"]: open_path(p))
             pic.grid(row=0, column=0, padx=10, pady=(10, 6))
-            ctk.CTkLabel(card, text=c["title"], font=self.font(13, "bold"), text_color=TEXT, wraplength=190,
-                         justify="left", anchor="w").grid(row=1, column=0, sticky="ew", padx=14)
+            ttl = ctk.CTkFrame(card, fg_color="transparent")
+            ttl.grid(row=1, column=0, sticky="ew", padx=14)
+            if c.get("market"):
+                ctk.CTkLabel(ttl, text=f"🌐 {c.get('market_label', c['market'])} · {c.get('lang', '')}",
+                             font=self.font(10, "bold"), text_color=ACCENT_TEXT, fg_color=ACCENT, corner_radius=6,
+                             height=18).grid(row=0, column=0, sticky="w", ipadx=5, pady=(0, 3))
+            ctk.CTkLabel(ttl, text=c["title"], font=self.font(13, "bold"), text_color=TEXT, wraplength=190,
+                         justify="left", anchor="w").grid(row=1, column=0, sticky="ew")
             if c.get("hook_title"):
                 self.muted(card, f"Hook: {c['hook_title']}", 11, wraplength=190).grid(row=2, column=0, sticky="ew",
                                                                                      padx=14, pady=(2, 0))
@@ -509,7 +555,40 @@ class App(ResearchMixin, LinksMixin, ctk.CTk):
                         ).grid(row=0, column=1, sticky="ew", padx=3)
             self.button(btns, "Vị trí", lambda p=c["file"]: reveal(p), height=30, width=50
                         ).grid(row=0, column=2, sticky="ew", padx=(3, 0))
+        if res.get("markets"):
+            self._plan_card(res).grid(row=2, column=0, sticky="ew", pady=(14, 0))
         self.res.grid(row=5, column=0, sticky="ew")
+
+    def _plan_card(self, res):
+        from . import markets
+        card = self.card(self.res)
+        card.grid_columnconfigure(0, weight=1)
+        self.h(card, "Lịch đăng gợi ý theo thị trường", 16).grid(row=0, column=0, sticky="w", padx=18, pady=(14, 2))
+        self.muted(card, "Khung giờ cao điểm theo giờ địa phương, đã đổi sang giờ máy của bạn. Checklist tín hiệu "
+                         "phân phối, file phụ đề .srt (thư mục phu_de) và bản dịch tiêu đề YouTube nằm trong thư mục dự án.",
+                   12, wraplength=900).grid(row=1, column=0, sticky="w", padx=18)
+        r = 2
+        for k in res["markets"]:
+            m = markets.MARKETS[k]
+            plan = markets.posting_plan(k)
+            if not plan:
+                continue
+            txt = "   ·   ".join(f"{plat}: " + ", ".join(mine for _, mine in rows) for plat, rows in plan)
+            ctk.CTkLabel(card, text=f"{m['label']}", font=self.font(13, "bold"), text_color=TEXT, anchor="w").grid(
+                row=r, column=0, sticky="w", padx=18, pady=(10, 0))
+            self.muted(card, "Giờ của bạn → " + txt, 12, wraplength=900).grid(row=r + 1, column=0, sticky="w", padx=18)
+            r += 2
+        bb = ctk.CTkFrame(card, fg_color="transparent")
+        bb.grid(row=r, column=0, sticky="w", padx=18, pady=(12, 16))
+        self.button(bb, "Mở report.md (checklist đầy đủ)", lambda: open_path(os.path.join(res["out_dir"], "report.md")),
+                    height=32).grid(row=0, column=0, padx=(0, 8))
+        yt = os.path.join(res["out_dir"], "youtube_localizations.txt")
+        if os.path.exists(yt):
+            self.button(bb, "Bản dịch tiêu đề YouTube", lambda: open_path(yt), height=32).grid(row=0, column=1, padx=(0, 8))
+        subs = os.path.join(res["out_dir"], "phu_de")
+        if os.path.isdir(subs):
+            self.button(bb, "Thư mục phụ đề .srt", lambda: open_path(subs), height=32).grid(row=0, column=2)
+        return card
 
     def _edit(self, out_dir, index):
         from .editor import ClipEditor, ProjectError
@@ -925,6 +1004,8 @@ class App(ResearchMixin, LinksMixin, ctk.CTk):
         c["caption_preset"] = self.preset_names.get(self.preset.get(), "classic")
         c["captions"], c["hook"] = bool(self.cap.get()), bool(self.hook.get())
         c["jumpcut"], c["emphasis"], c["progress_bar"] = bool(self.jump.get()), bool(self.emph.get()), bool(self.pbar.get())
+        c["markets"] = list(self.mk_sel)
+        c["keep_original"], c["bilingual"] = bool(self.mk_keep.get()), bool(self.mk_bi.get())
         config.save(c)
         return c
 

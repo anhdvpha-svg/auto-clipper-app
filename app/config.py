@@ -102,6 +102,9 @@ DEFAULTS = {
     "jumpcut": True,                  # cut pauses and filler sounds (talking videos)
     "progress_bar": False,            # thin progress bar along the bottom
     "ai_framing": True,               # with an AI provider: the model checks the framing of every shot
+    "markets": [],                    # target markets for localized versions (markets.MARKETS keys)
+    "keep_original": True,            # keep the source-language version next to the localized ones
+    "bilingual": False,               # localized captions + the original line underneath
     "cookies_file": "",               # cookies.txt exported from a logged-in browser (Instagram, TikTok...)
     "encoder": "auto",                # auto (GPU if available) | x264 (CPU)
     "browser": "",                    # "" | firefox | chrome | edge | brave - YouTube login fallback
