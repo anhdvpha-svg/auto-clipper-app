@@ -139,6 +139,16 @@ def selftest(out_dir):
             log(f"login window check: exit {r.returncode}")
         except Exception as e:
             log(f"login window check (non-fatal): {e}")
+        # hidden-browser search (TikTok/Instagram/X with the saved login): the machinery must work (non-fatal)
+        try:
+            from app import scraper
+            html = ('<html><body><a href="https://www.tiktok.com/@ac/video/7300000000000000001"><img alt="Test clip" '
+                    'src="x.jpg"></a><a href="https://www.tiktok.com/@ac/video/7300000000000000002">1.2M\nSecond</a>'
+                    '</body></html>')
+            items, err = scraper.scrape("tiktok", "test", 5, html=html, timeout=90)
+            log(f"scraper check: {len(items)} items, error={err}")
+        except Exception as e:
+            log(f"scraper check (non-fatal): {e}")
         # target markets: time zones must be bundled (tzdata) and bilingual captions must build
         from app import markets
         assert markets.posting_plan("us") and markets.posting_plan("br"), "time zone data missing"
@@ -184,6 +194,9 @@ def selftest(out_dir):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) >= 4 and sys.argv[1] == "--scrape":  # hidden browser search with the saved login
+        from app import scraper
+        sys.exit(scraper.run_scrape_process(sys.argv[2], sys.argv[3]))
     if len(sys.argv) >= 3 and sys.argv[1] == "--login":  # in-app login window (own process)
         from app import platform_login
         sys.exit(platform_login.run_login_window(sys.argv[2], close_after=float(sys.argv[3]) if len(sys.argv) > 3 else None))

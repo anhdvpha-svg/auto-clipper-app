@@ -49,8 +49,11 @@ def resolve(url, ytdlp, deno=None, cookies=None, browser=None):
                 "tags": [], "webpage_url": url, "duration": float(j["format"].get("duration") or 0) or None,
                 "width": v.get("width"), "height": v.get("height")}
     from . import platform_login
-    a = [ytdlp, "-J", "--no-playlist", "--no-warnings", "--ignore-config",
-         "-f", "b[height<=480][vcodec!=none][acodec!=none]/bv*[height<=480]+ba/b[height<=720]/bv*+ba/b"]
+    a = [ytdlp, "-J", "--no-playlist", "--no-warnings", "--ignore-config", "--skip-download",
+         "--no-write-comments", "--socket-timeout", "15",
+         # one progressive file first (one connection, starts fastest), else small video + audio
+         "-f", "18/b[height<=480][vcodec!=none][acodec!=none][protocol^=http]/b[height<=480][vcodec!=none]"
+               "[acodec!=none]/bv*[height<=480]+ba/b[height<=720]/bv*+ba/b"]
     if deno:
         a += ["--js-runtimes", f"deno:{deno}"]
     ck = cookies or platform_login.cookies_for_url(url)
@@ -66,9 +69,41 @@ def resolve(url, ytdlp, deno=None, cookies=None, browser=None):
         from .downloader import _explain
         raise PlayerError(_explain(err, url))
     d = json.loads(out)
+    if not d:
+        err = (r.stderr.strip().splitlines() or ["video không phát được"])[-1]
+        from .downloader import _explain
+        raise PlayerError(_explain(err, url))
     if d.get("_type") == "playlist" and d.get("entries"):
         d = d["entries"][0]
+    return info_from_json(d, url)
+
+
+def _pick(d):
+    """Choose preview streams from a full yt-dlp JSON (no -f): progressive <=480p, else video<=480p + audio."""
+    fm = [f for f in d.get("formats") or [] if f.get("url") and f.get("protocol") not in ("mhtml",)
+          and "storyboard" not in (f.get("format_note") or "")]
+    rank = lambda f: (1 if (f.get("protocol") or "").startswith("http") else 0, f.get("height") or 0)
+    prog = [f for f in fm if f.get("vcodec") not in (None, "none") and f.get("acodec") not in (None, "none")
+            and (f.get("height") or 0) <= 480]
+    if prog:
+        best = max(prog, key=rank)
+        return best, best
+    vids = [f for f in fm if f.get("vcodec") not in (None, "none") and (f.get("height") or 0) <= 480]
+    auds = [f for f in fm if f.get("acodec") not in (None, "none") and f.get("vcodec") in (None, "none")]
+    if vids:
+        return max(vids, key=rank), (max(auds, key=lambda f: (rank(f)[0], f.get("abr") or 0)) if auds else None)
+    return None, None
+
+
+def info_from_json(d, url=None):
     rf = d.get("requested_formats")
+    if not rf and not d.get("url") and d.get("formats"):
+        v, a = _pick(d)
+        if v is not None:
+            rf = [v] + ([a] if a is not None and a is not v else [])
+            if a is v:
+                d = dict(d, **{k: v.get(k) for k in ("url", "http_headers", "protocol", "cookies", "width", "height")})
+                rf = None
     if rf:
         vid = next((f for f in rf if f.get("vcodec") != "none"), rf[0])
         aud = next((f for f in rf if f.get("acodec") != "none"), None)
@@ -77,10 +112,58 @@ def resolve(url, ytdlp, deno=None, cookies=None, browser=None):
     return {"title": d.get("title") or "", "description": d.get("description") or "", "tags": d.get("tags") or [],
             "uploader": d.get("uploader") or d.get("channel") or "", "duration": d.get("duration"),
             "view_count": d.get("view_count"), "like_count": d.get("like_count"),
-            "webpage_url": d.get("webpage_url") or url, "width": vid.get("width") or d.get("width"),
+            "webpage_url": d.get("webpage_url") or url or "", "width": vid.get("width") or d.get("width"),
             "height": vid.get("height") or d.get("height"), "video": _stream(vid),
             "audio": _stream(aud) if aud else None, "subtitles": d.get("subtitles") or {},
             "automatic_captions": d.get("automatic_captions") or {}, "language": d.get("language")}
+
+
+CACHE, _INFLIGHT, _CLOCK = {}, {}, threading.Lock()
+TTL = 2.5 * 3600  # stream links expire after a few hours
+
+
+def remember(url, info):
+    CACHE[url] = (time.time(), info)
+
+
+def cached(url, ytdlp, deno=None, cookies=None, browser=None):
+    """resolve() with memory: a video opened (or hovered) before starts at once."""
+    hit = CACHE.get(url)
+    if hit and time.time() - hit[0] < TTL:
+        return hit[1]
+    with _CLOCK:
+        ev = _INFLIGHT.get(url)
+        mine = ev is None
+        if mine:
+            ev = _INFLIGHT[url] = threading.Event()
+    if not mine:  # a prefetch is already on it: wait for that one
+        ev.wait(130)
+        hit = CACHE.get(url)
+        if hit:
+            return hit[1]
+    try:
+        info = resolve(url, ytdlp, deno, cookies, browser)
+        remember(url, info)
+        return info
+    finally:
+        if mine:
+            ev.set()
+            _INFLIGHT.pop(url, None)
+
+
+def prefetch(url, cfg):
+    """Start finding the stream in the background (mouse over a result) so ▶ Xem opens instantly."""
+    if not url or os.path.isfile(url) or url in _INFLIGHT or (url in CACHE and time.time() - CACHE[url][0] < TTL):
+        return
+
+    def work():
+        try:
+            from . import tools
+            t = tools.ensure(lambda m: None)
+            cached(url, t["yt-dlp"], t["deno"], cfg.get("cookies_file") or None, cfg.get("browser") or None)
+        except Exception:
+            pass
+    threading.Thread(target=work, daemon=True).start()
 
 
 def caption_text(info):
@@ -152,6 +235,7 @@ class Player:
                 a += ["-headers", hdr]
             if s["proto"].startswith("http") and "m3u8" not in s["proto"]:
                 a += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "4"]
+            a += ["-probesize", "1000000", "-analyzeduration", "1000000", "-fflags", "+nobuffer"]
         return a + ["-i", s["url"]]
 
     def start(self, at=None):
@@ -339,7 +423,30 @@ class PlayerWindow(ctk.CTkToplevel):
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.after(50, self.lift)
         threading.Thread(target=self._load, daemon=True).start()
+        if item.get("thumb"):
+            threading.Thread(target=self._load_thumb, args=(item["thumb"],), daemon=True).start()
+        self._t_open = time.time()
         self.after(30, self._tick)
+
+    def _load_thumb(self, url):
+        """The cover picture right away, while the stream is being found."""
+        try:
+            import io, httpx
+            from PIL import Image, ImageOps, ImageEnhance
+            r = httpx.get(url, timeout=10, follow_redirects=True)
+            im = ImageOps.pad(Image.open(io.BytesIO(r.content)).convert("RGB"), (self.VW, self.VH), color=(0, 0, 0))
+            im = ImageEnhance.Brightness(im).enhance(0.55)
+        except Exception:
+            return
+
+        def show():
+            if self.winfo_exists() and self.player is None:
+                from PIL import ImageTk
+                self._cover = ImageTk.PhotoImage(im)
+                self.canvas.delete("cover")
+                self.canvas.create_image(0, 0, image=self._cover, anchor="nw", tags="cover")
+                self.canvas.tag_raise("msg")
+        self.after(0, show)
 
     # ---------- video area ----------
     def _layout_video(self):
@@ -373,8 +480,8 @@ class PlayerWindow(ctk.CTkToplevel):
                 t = {"yt-dlp": None, "deno": None}
             else:
                 t = tools.ensure(lambda m: None)
-            info = resolve(self.item["url"], t["yt-dlp"], t["deno"], self.app.cfg.get("cookies_file") or None,
-                           self.app.cfg.get("browser") or None)
+            info = cached(self.item["url"], t["yt-dlp"], t["deno"], self.app.cfg.get("cookies_file") or None,
+                          self.app.cfg.get("browser") or None)
             self.after(0, lambda: self._loaded(info, None))
         except Exception as e:
             self.after(0, lambda e=e: self._loaded(None, str(e)))
@@ -431,6 +538,13 @@ class PlayerWindow(ctk.CTkToplevel):
         if not self.winfo_exists():
             return
         p = self.player
+        if p is None and self.info is None and self.canvas.find_withtag("msg"):
+            sec = int(time.time() - self._t_open)
+            try:
+                if "Không phát" not in self.canvas.itemcget("msg", "text"):
+                    self.canvas.itemconfigure("msg", text=f"Đang lấy luồng video... {sec}s", fill="#E7E9EE")
+            except Exception:
+                pass
         if p:
             fr = p.frame()
             if fr:

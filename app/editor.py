@@ -795,7 +795,15 @@ class ClipEditor(ctk.CTkToplevel):
         self.save_btn.configure(state="normal", text="Dựng lại clip")
         if err:
             self.msg.configure(text=f"Lỗi: {err}", text_color="#F87171")
+            try:
+                self.app.notify("Dựng lại clip lỗi", err[:120], ok=False)
+            except Exception:
+                pass
             return
         self.rendered = new
         self.msg.configure(text="Đã dựng lại! Bấm Xem clip để kiểm tra.", text_color="#4ADE80")
+        try:
+            self.app.notify("Dựng lại clip xong", self.clip.get("title", "")[:80])
+        except Exception:
+            pass
         self.on_saved(self.index, self.clip, new)

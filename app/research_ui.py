@@ -324,6 +324,7 @@ class ResearchMixin:
             self._rs_busy(False)
             if items is None:
                 self.rs_status.configure(text=errors[0], text_color="#F87171")
+                self.notify("Khám phá nguồn lỗi", errors[0][:120], ok=False)
                 return
             self.rs_raw, self.rs_checks = items, {}
             self.rs_items = research.apply_filters(list(items), self._rs_filters())
@@ -334,6 +335,10 @@ class ResearchMixin:
                 msg += "\nKhông quét được: " + " | ".join(errors[:4])
             self.rs_status.configure(text=msg, text_color="#FBBF24" if errors else self.theme["MUTED"])
             self._rs_render()
+            for x in self.rs_items[:3]:  # the likely first clicks are ready before you click
+                self._prefetch(x["url"])
+            self.notify("Khám phá nguồn xong", f"{len(self.rs_items)} video cho {what}"
+                        + (f" · {len(errors)} nền tảng lỗi" if errors else ""), ok=not (errors and not items))
         elif kind == "rs_thumb":
             key, img = data
             lbl = self._rs_thumb_labels.get(key)
@@ -359,6 +364,8 @@ class ResearchMixin:
                                border_color=T["BORDER"])
             row.grid(row=i, column=0, sticky="ew", pady=4)
             row.grid_columnconfigure(3, weight=1)
+            # mouse over a result: start finding its stream now, so ▶ Xem opens at once
+            row.bind("<Enter>", lambda _e, u=x["url"]: self._prefetch(u))
             var = self.rs_checks.get(x["url"]) or ctk.BooleanVar(value=False)
             self.rs_checks[x["url"]] = var
             ctk.CTkCheckBox(row, text="", variable=var, width=24, fg_color=T["ACCENT"], hover_color=T["ACCENT_HOVER"],
@@ -401,6 +408,10 @@ class ResearchMixin:
             self.button(btns, "Cắt ngay", lambda u=x["url"]: self.enqueue([u], front=True), primary=True, width=90,
                         height=30).grid(row=2, column=0, pady=2)
         self._rs_upd_sel()
+
+    def _prefetch(self, url):
+        from . import player
+        player.prefetch(url, self.cfg)
 
     def _rs_load_thumb(self, key, url):
         def work():

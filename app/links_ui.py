@@ -20,6 +20,19 @@ class LinksMixin:
         lbl.lift()
         self.after(2600, lbl.destroy)
 
+    def notify(self, title, body="", ok=True):
+        """Every finished task: toast in the app; when the app is not in front also a Windows notification,
+        a flashing taskbar button and a sound."""
+        from . import notify
+        try:
+            self.toast(f"{'✓' if ok else '⚠'} {title}" + (f" · {body}" if body else ""),
+                       None if ok else "#FBBF24")
+        except Exception:
+            pass
+        if not notify.app_has_focus(self):
+            notify.system_toast(title, body)
+            notify.flash_and_beep(self, ok)
+
     def open_player(self, item):
         from .player import PlayerWindow
         PlayerWindow(self, item)
@@ -73,8 +86,8 @@ class LinksMixin:
                 self.after(800, wait)
                 return
             ok = platform_login.is_logged_in(site)
-            self.toast(f"✓ Đã đăng nhập {platform_login.SITES[site]['label']}" if ok
-                       else f"Chưa đăng nhập {platform_login.SITES[site]['label']}", None if ok else "#FBBF24")
+            self.notify(f"Đã đăng nhập {platform_login.SITES[site]['label']}" if ok
+                        else f"Chưa đăng nhập {platform_login.SITES[site]['label']}", "", ok)
             self.refresh_logins()
             if ok and after:
                 after()
@@ -250,7 +263,7 @@ class LinksMixin:
             links.update(name, u, title=d.get("title"), channel=d.get("uploader") or d.get("channel"),
                          views=d.get("view_count"), duration=d.get("duration"), thumb=d.get("thumbnail"),
                          ts=d.get("timestamp"))
-        self.q.put(("lk_refresh", None))
+        self.q.put(("lk_refresh", len(urls)))
 
     def _lk_items(self):
         p = links.project(links.load(), self._lk_current, create=False) if self._lk_current else None
@@ -273,6 +286,7 @@ class LinksMixin:
                                border_color=T["BORDER"])
             row.grid(row=i, column=0, sticky="ew", pady=4)
             row.grid_columnconfigure(1, weight=1)
+            row.bind("<Enter>", lambda _e, u=x["url"]: self._prefetch(u))
             th = ctk.CTkLabel(row, text="", width=144, height=81, fg_color=T["CARD2"], corner_radius=8,
                               cursor="hand2")
             th.grid(row=0, column=0, rowspan=3, padx=12, pady=10)
@@ -350,6 +364,8 @@ class LinksMixin:
         elif kind == "lk_refresh":
             if self._lk_current:
                 self._lk_render()
+            if data:
+                self.notify("Kho link", f"Đã lấy thông tin {data} link")
 
 
 def _open(url):

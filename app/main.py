@@ -11,7 +11,7 @@ from .links_ui import LinksMixin
 from .pipeline import Job, is_url
 
 APP_TITLE = "Auto Clipper"
-VERSION = "2.0"
+VERSION = "2.1"
 
 # ---- palette (dark, cyan accent - CapCut desktop feel) ----
 BG = "#0E0F12"
@@ -1059,6 +1059,7 @@ class App(ResearchMixin, LinksMixin, ctk.CTk):
         if self.job or not self.clip_queue:
             return
         url = self.clip_queue.pop(0)
+        self._queue_ran = True
         self._upd_queue()
         self.src.delete(0, "end")
         self.src.insert(0, url)
@@ -1129,8 +1130,17 @@ class App(ResearchMixin, LinksMixin, ctk.CTk):
                             self._toggle_log()
                         self._show_results(res)
                         self.after(150, lambda: self.pages["create"]._parent_canvas.yview_moveto(1.0))
+                    left = len(self.clip_queue)
+                    if err and err != "Đã huỷ.":
+                        self.notify("Tạo clip lỗi", err.splitlines()[0][:140], ok=False)
+                    elif not err:
+                        self.notify("Tạo clip xong", f"{len(res['clips'])} clip"
+                                    + (f" · còn {left} video trong hàng chờ" if left else ""))
                     if self.clip_queue and not (err and err == "Đã huỷ."):
                         self.after(1500, self._start_next)  # next video in the queue, success or not
+                    elif getattr(self, "_queue_ran", False) and not self.clip_queue:
+                        self._queue_ran = False
+                        self.notify("Hàng chờ đã cắt xong", "Tất cả video trong hàng chờ đã xử lý")
         except queue.Empty:
             pass
         self.after(100, self._poll)

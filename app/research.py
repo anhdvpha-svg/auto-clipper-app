@@ -24,18 +24,16 @@ LOGIN = {"tiktok": ("tiktok", True), "instagram": ("instagram", True), "x": ("x"
 PLATFORMS = {
     "yt_long":   {"label": "YouTube video dài", "kw": "search", "name": "YouTube"},
     "yt_shorts": {"label": "YouTube Shorts", "kw": "search", "name": "YouTube Shorts"},
-    "tiktok":    {"label": "TikTok", "kw": "tag", "name": "TikTok",
-                  "hint": "TikTok: tìm theo hashtag, cần chọn trình duyệt đã đăng nhập TikTok trong Cài đặt."},
-    "instagram": {"label": "Instagram Reels", "kw": "tag", "name": "Instagram",
-                  "hint": "Instagram: tìm theo hashtag, cần đăng nhập (trình duyệt hoặc cookies.txt trong Cài đặt)."},
+    "tiktok":    {"label": "TikTok", "kw": "search", "name": "TikTok",
+                  "hint": "TikTok, Instagram, X: tìm bằng phiên đăng nhập trong app (mỗi nền tảng ~20–40 giây)."},
+    "instagram": {"label": "Instagram Reels", "kw": "search", "name": "Instagram"},
     "twitch":    {"label": "Twitch", "kw": "channel", "name": "Twitch",
                   "hint": "Twitch/Kick không có tìm kiếm công khai: gõ tên kênh (vd: xqc, kaicenat), app lấy clip "
                           "hot 7 ngày + VOD mới."},
     "kick":      {"label": "Kick", "kw": "channel", "name": "Kick"},
     "dailymotion": {"label": "Dailymotion", "kw": "search", "name": "Dailymotion"},
     "bilibili":  {"label": "Bilibili", "kw": "search", "name": "Bilibili"},
-    "x":         {"label": "X (Twitter)", "kw": "channel", "name": "X",
-                  "hint": "X: gõ tên tài khoản (vd: elonmusk), cần đăng nhập X trong trình duyệt."},
+    "x":         {"label": "X (Twitter)", "kw": "search", "name": "X"},
     "rumble":    {"label": "Rumble", "kw": "channel", "name": "Rumble"},
 }
 
@@ -168,19 +166,15 @@ class Researcher:
         if key == "bilibili":
             d = self._json(["--flat-playlist", "-J", f"bilisearch{n}:{q}"])
             return [self._norm(e, "Bilibili") for e in d.get("entries") or [] if e]
-        if key == "tiktok":
-            return self.channel(f"https://www.tiktok.com/tag/{_slug_tag(q)}", n, platform="TikTok")
-        if key == "instagram":
-            return self.channel(f"https://www.instagram.com/explore/tags/{_slug_tag(q)}/", n, platform="Instagram")
+        if key in ("tiktok", "instagram", "x"):
+            return self._browse(key, q, n)
         if P["kw"] == "channel":
             urls = []
             for h in _handles(q)[:8]:
                 if key == "twitch":
                     urls += [f"https://www.twitch.tv/{h}/clips?filter=clips&range=7d", f"https://www.twitch.tv/{h}"]
                 elif key == "kick":
-                    urls.append(f"https://kick.com/{h}")
-                elif key == "x":
-                    urls.append(f"https://x.com/{h}")
+                    urls += [f"https://kick.com/{h}/clips", f"https://kick.com/{h}/videos"]
                 elif key == "rumble":
                     urls.append(f"https://rumble.com/c/{h}")
             items, errors = self.channels(urls, max(5, n // max(1, len(urls))))
@@ -188,6 +182,29 @@ class Researcher:
                 raise ResearchError(errors[0])
             return items
         raise ResearchError(f"{P['label']}: chưa hỗ trợ tìm theo từ khoá.")
+
+    def _browse(self, site, query, n, kind="search"):
+        """TikTok / Instagram / X: search inside the saved in-app login (hidden browser window)."""
+        from . import platform_login, scraper
+        name = {"tiktok": "TikTok", "instagram": "Instagram", "x": "X"}[site]
+        if not platform_login.is_logged_in(site):
+            raise ResearchError(f"{name} cần đăng nhập: bấm nút 🔒 {name} ở trên để đăng nhập một lần trong app.")
+        items, err = scraper.scrape(site, query, n, kind=kind)
+        if not items:
+            if err == "login":
+                raise ResearchError(f"Phiên đăng nhập {name} đã hết hạn: bấm nút ✓ {name} → Đăng nhập lại.")
+            if err in ("empty", None):
+                raise ResearchError(f"{name} không trả về video cho “{query}” (thử từ khoá khác, hoặc {name} đang "
+                                    f"yêu cầu xác minh: mở {name} trong cửa sổ Đăng nhập lại một lần).")
+            raise ResearchError(f"Không tìm được trên {name}: {err}")
+        for x in items:
+            x.setdefault("channel_id", None)
+        if kind == "user":
+            views = sorted(x["views"] for x in items if x.get("views"))
+            if len(views) >= 4:
+                for x in items:
+                    x["ch_median"] = views[len(views) // 2]
+        return items[:n]
 
     def _dailymotion(self, q, period, sort, n):
         import httpx
@@ -236,12 +253,20 @@ class Researcher:
         return items, errors
 
     def channel(self, url, n=15, platform=None):
-        lst = source_listing_url(url)
         plat = platform or platform_of(url)
+        m = re.match(r"https?://(?:www\.)?(instagram\.com|x\.com|twitter\.com)/@?([\w.]+)/?(?:reels/?|media/?)?$", url.strip())
+        if m and m.group(2) not in ("explore", "search", "i", "p", "reel"):
+            site = "instagram" if "instagram" in m.group(1) else "x"
+            return self._browse(site, m.group(2), n, kind="user")
+        lst = source_listing_url(url)
         d = self._json(["--flat-playlist", "-J", "--playlist-end", str(n), lst])
         if d.get("_type") != "playlist":   # a single video link
             return [self._norm(d, plat)]
         entries = [e for e in (d.get("entries") or []) if e]
+        if not entries and plat == "TikTok":
+            mu = re.search(r"tiktok\.com/@([\w.-]+)", url)
+            if mu:  # yt-dlp got nothing: browse the profile with the saved login
+                return self._browse("tiktok", mu.group(1), n, kind="user")
         if not entries:
             if plat in ("Instagram", "TikTok", "X"):
                 raise ResearchError(f"{plat} không trả về video vì chưa đăng nhập: bấm nút 🔒 {plat} ở trên để đăng "
